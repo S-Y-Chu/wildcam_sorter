@@ -1,0 +1,17 @@
+# 打包临时文件
+build/
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# AI助手元数据
+.reasonix/
+
+# 空文件夹
+2026.7_wildcam_recognition-main/
+
+# 系统文件
+.DS_Store
+Thumbs.db
