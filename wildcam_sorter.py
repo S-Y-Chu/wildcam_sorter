@@ -42,8 +42,11 @@ import json
 import re
 import csv
 import shutil
+import logging
+import traceback
 from pathlib import Path
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -495,6 +498,139 @@ class MediaPanel:
         # BILINEAR 高质量缩放（静态图片只加载一次，质量优先于速度）
         pil_resized = pil_img.resize((new_w, new_h), Image.LANCZOS)
         return ImageTk.PhotoImage(pil_resized)
+    
+    # ==================== 迷你操作区（框内独立类别选择）====================
+    
+    def setup_mini_ops(self, species_list: list, on_select: callable, on_multi: callable):
+        """
+        创建迷你物种按钮（在取消选中时显示）。
+        
+        参数：
+            species_list: 物种名称列表
+            on_select: 点击物种按钮的回调(species_name)
+            on_multi: 点击多类别按钮的回调
+        """
+        # 迷你操作区容器（初始隐藏，用place定位到面板底部）
+        self.mini_frame = tk.Frame(self.frame, bg=COLOR_PANEL_BG, height=32)
+        self.mini_frame.pack_propagate(False)  # 固定32px高
+        # 不立即显示，等待show_mini_ops()调用
+        
+        self.mini_buttons = {}
+        self.mini_multi_on = False
+        self.mini_selected = set()
+        self._mini_on_select = on_select
+        self._mini_on_multi = on_multi
+        
+        # 创建迷你按钮（小字体，紧凑间距）
+        icons = ["🐾","🦌","🐗","🐻","🐺","🦊","🐵","🐮","🐴","🐑","🐰","🦃","🦅","🦉","🐍","🦎","🐢","🦔","🐿","🦡"]
+        for i, name in enumerate(species_list[:12]):  # 最多12个迷你按钮
+            icon = icons[i % len(icons)]
+            btn = tk.Button(
+                self.mini_frame,
+                text=f"{icon}{name[:2]}",  # 图标+物种名前2字
+                font=("微软雅黑", 8),
+                bg=COLOR_BUTTON_SPECIES, fg='white',
+                activebackground='#43A047',
+                relief=tk.FLAT, cursor='hand2',
+                padx=4, pady=1,
+                command=lambda n=name: self._on_mini_species(n)
+            )
+            btn.pack(side=tk.LEFT, padx=1)
+            self.mini_buttons[name] = btn
+        
+        # 迷你多类别按钮
+        self.mini_multi_btn = tk.Button(
+            self.mini_frame,
+            text="📋", font=("微软雅黑", 8),
+            bg='#6A1B9A', fg='white',
+            relief=tk.FLAT, cursor='hand2',
+            padx=4, pady=1,
+            command=self._on_mini_multi
+        )
+        self.mini_multi_btn.pack(side=tk.LEFT, padx=1)
+    
+    def _on_mini_species(self, name: str):
+        """迷你物种按钮点击：多类模式下toggle，否则直接选择"""
+        if self.mini_multi_on:
+            if name in self.mini_selected:
+                self.mini_selected.discard(name)
+            else:
+                self.mini_selected.add(name)
+            self._update_mini_buttons()
+        else:
+            # 单选模式：清除其他选择，只选这一个
+            self.mini_selected = {name}
+            self._update_mini_buttons()
+            # 直接通过回调通知
+            if self._mini_on_select:
+                self._mini_on_select(self.index, self.mini_selected)
+    
+    def _on_mini_multi(self):
+        """迷你多类别按钮"""
+        if self.mini_multi_on:
+            # 完成选择 → 通知回调
+            if self._mini_on_select:
+                self._mini_on_select(self.index, self.mini_selected)
+            self.mini_multi_on = False
+            self.mini_multi_btn.config(text="📋", bg='#6A1B9A')
+            # 完成后自动隐藏迷你操作区
+            self.hide_mini_ops()
+        else:
+            # 进入多类模式
+            self.mini_multi_on = True
+            self.mini_multi_btn.config(text="✅", bg='#E65100')
+            self.mini_selected.clear()
+            self._update_mini_buttons()
+    
+    def _update_mini_buttons(self):
+        """更新迷你按钮外观"""
+        for name, btn in self.mini_buttons.items():
+            if name in self.mini_selected:
+                btn.config(bg='#FF6F00')
+            else:
+                btn.config(bg=COLOR_BUTTON_SPECIES)
+    
+    def show_mini_ops(self):
+        """显示迷你操作区（使用place确保可靠显示）"""
+        if not hasattr(self, 'mini_frame'):
+            return
+        # 用place固定在面板底部（name_label上方）
+        self.mini_frame.place(relx=0, rely=1.0, anchor='sw', relwidth=1.0, y=-20)
+        self.mini_frame.lift()
+        self.mini_selected.clear()
+        self.mini_multi_on = False
+        if hasattr(self, 'mini_multi_btn') and self.mini_multi_btn.winfo_exists():
+            self.mini_multi_btn.config(text="📋", bg='#6A1B9A')
+        self._update_mini_buttons()
+    
+    def hide_mini_ops(self):
+        """隐藏迷你操作区"""
+        if not hasattr(self, 'mini_frame'):
+            return
+        self.mini_frame.place_forget()
+        self.mini_selected.clear()
+        self.mini_multi_on = False
+    
+    def rebuild_mini_buttons(self, species_list: list):
+        """重建迷你按钮（物种列表变化时）"""
+        for btn in self.mini_buttons.values():
+            btn.destroy()
+        self.mini_buttons.clear()
+        icons = ["🐾","🦌","🐗","🐻","🐺","🦊","🐵","🐮","🐴","🐑","🐰","🦃","🦅","🦉","🐍","🦎","🐢","🦔","🐿","🦡"]
+        for i, name in enumerate(species_list[:12]):
+            icon = icons[i % len(icons)]
+            btn = tk.Button(
+                self.mini_frame,
+                text=f"{icon}{name[:2]}",
+                font=("微软雅黑", 8),
+                bg=COLOR_BUTTON_SPECIES, fg='white',
+                activebackground='#43A047',
+                relief=tk.FLAT, cursor='hand2',
+                padx=4, pady=1,
+                command=lambda n=name: self._on_mini_species(n)
+            )
+            btn.pack(side=tk.LEFT, padx=1)
+            self.mini_buttons[name] = btn
 
 
 # ==================== 全分辨率查看器 ====================
@@ -841,8 +977,9 @@ class WildCamSorter:
     
     def __init__(self, source_dir: str = None):
         # ===== 数据状态 =====
-        self.source_dir = None            # 源文件夹路径
-        self.parent_dir = None            # 目标父文件夹（源文件夹的父目录）
+        self.source_dir = None            # 源文件夹路径（输入）
+        self.target_dir = None            # 目标文件夹路径（输出，默认为源文件夹的父目录）
+        self.parent_dir = None            # 源文件夹的父目录（用于进度追踪标识）
         self.groups = []                  # 文件分组列表
         self.current_group_index = -1     # 当前组索引
         self.current_group_files = []     # 当前组文件路径列表
@@ -865,6 +1002,10 @@ class WildCamSorter:
         self._panels = []                 # MediaPanel 列表（4个）
         self._resize_after_id = None      # 窗口调整大小时的防抖 ID
         self._panels_ready = False        # 面板是否已完成首次渲染
+        
+        # ===== 日志系统 =====
+        self.logger = None
+        self._setup_logging()
         
         # ===== 创建主窗口 =====
         self.root = tk.Tk()
@@ -917,6 +1058,22 @@ class WildCamSorter:
         )
         self.btn_open.pack(side=tk.LEFT, padx=8, pady=3)
         
+        # 目标文件夹按钮
+        self.btn_target = tk.Button(
+            toolbar, text="📤 输出到", font=("微软雅黑", 10),
+            bg='#555555', fg='white', activebackground='#777777',
+            relief=tk.FLAT, cursor='hand2',
+            command=self._prompt_target_folder, padx=10, pady=3
+        )
+        self.btn_target.pack(side=tk.LEFT, padx=3, pady=3)
+        
+        # 目标文件夹路径显示
+        self.label_target = tk.Label(
+            toolbar, text="", font=("微软雅黑", 10),
+            bg=COLOR_TOOLBAR, fg='#888888', anchor=tk.W
+        )
+        self.label_target.pack(side=tk.LEFT, padx=3, pady=3)
+        
         # 文件夹路径显示
         self.label_folder = tk.Label(
             toolbar, text="未打开文件夹", font=("微软雅黑", 10),
@@ -960,7 +1117,17 @@ class WildCamSorter:
             panel.frame.grid(row=row, column=col, sticky='nsew', padx=2, pady=2)
             panel.set_toggle_callback(self._toggle_file_selection)
             panel.set_fullscreen_callback(self._open_fullscreen)
+            # 初始化迷你操作区（但隐藏）
+            panel.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
             self._panels.append(panel)
+        
+        # 每文件独立选择记录 {file_index: set(species_names)}
+        self.per_file_species = {}
+        
+        # 溢出文件行（当组内文件>4时显示）
+        self.display_frame.grid_rowconfigure(2, weight=0)  # 溢出行的权重为0（默认隐藏）
+        self.overflow_frame = tk.Frame(self.display_frame, bg=COLOR_BG)
+        self.overflow_panels = []  # 额外的MediaPanel列表
     
     # ==================== UI：操作区 ====================
     
@@ -993,6 +1160,17 @@ class WildCamSorter:
         # 物种按钮容器
         self.species_frame = tk.Frame(left_frame, bg='#1A1A1A')
         self.species_frame.pack(side=tk.LEFT, padx=4)
+        
+        # 多类别切换按钮
+        self.multi_mode = False
+        self.multi_selected = set()  # 多类模式下选中的物种集合
+        self.btn_multi = tk.Button(
+            left_frame, text="📋 多类别", font=("微软雅黑", 11, "bold"),
+            bg='#6A1B9A', fg='white', activebackground='#9C27B0',
+            relief=tk.FLAT, cursor='hand2', padx=10, pady=8,
+            command=self._toggle_multi_mode
+        )
+        self.btn_multi.pack(side=tk.LEFT, padx=4)
         
         # 新物种按钮
         self.btn_new = tk.Button(
@@ -1136,8 +1314,14 @@ class WildCamSorter:
         """从源文件夹初始化数据"""
         self.source_dir = os.path.abspath(source_dir)
         self.parent_dir = os.path.dirname(self.source_dir)
+        if self.target_dir is None:
+            self.target_dir = self.parent_dir
+        
+        self._log(f"打开文件夹: {self.source_dir}")
+        self._log(f"输出目录: {self.target_dir}")
         
         self.label_folder.config(text=f"📁 {self.source_dir}")
+        self.label_target.config(text=f"📤 输出到: {self.target_dir}")
         
         # 扫描文件分组
         self.groups = scan_and_group_files(self.source_dir)
@@ -1160,6 +1344,9 @@ class WildCamSorter:
         
         # 加载进度记录
         self._load_progress()
+        
+        # ---- 检测已手动分好的照片（从目标文件夹中识别）----
+        self._detect_presorted_files()
         
         # 找到第一个未处理的组
         first_unprocessed = 0
@@ -1196,6 +1383,17 @@ class WildCamSorter:
         if folder:
             self._stop_video()
             self._init_from_source(folder)
+    
+    def _prompt_target_folder(self):
+        """弹出目标文件夹选择对话框（分类结果输出位置）"""
+        initial = self.target_dir if self.target_dir else os.path.expanduser("~")
+        folder = filedialog.askdirectory(title="选择分类结果的输出文件夹", initialdir=initial)
+        if folder:
+            self.target_dir = os.path.abspath(folder)
+            self._log(f"更改输出目录: {self.target_dir}")
+            self.label_target.config(text=f"📤 输出到: {self.target_dir}")
+            # 重新扫描已有物种文件夹
+            self._scan_species_folders()
     
     def _scan_species_folders(self):
         """扫描父文件夹中已有的物种文件夹并重建按钮"""
@@ -1243,6 +1441,75 @@ class WildCamSorter:
                 }, f, ensure_ascii=False, indent=2)
         except IOError:
             pass
+    
+    def _detect_presorted_files(self):
+        """
+        扫描目标文件夹中已有的物种子文件夹，检测哪些组已经被手动分好。
+        如果一组的所有文件都已存在于目标文件夹的某个子目录中，自动标记为已处理。
+        """
+        if not self.target_dir or not os.path.isdir(self.target_dir):
+            return
+        
+        # 收集目标文件夹中所有已存在的文件名 → 所在子文件夹
+        existing_files = {}  # {filename: subfolder_name}
+        source_basename = os.path.basename(self.source_dir) if self.source_dir else ""
+        
+        for entry in os.listdir(self.target_dir):
+            sub_path = os.path.join(self.target_dir, entry)
+            if os.path.isdir(sub_path) and entry != source_basename and not entry.startswith('.'):
+                try:
+                    for fname in os.listdir(sub_path):
+                        full = os.path.join(sub_path, fname)
+                        if os.path.isfile(full) and is_media_file(fname):
+                            existing_files[fname] = entry
+                except OSError:
+                    pass
+        
+        if not existing_files:
+            return
+        
+        # 检查每个组：如果所有源文件都已存在于目标文件夹中，标记为已处理
+        newly_found = 0
+        for group_idx, group in enumerate(self.groups):
+            rel_path = self._get_group_rel_path(group_idx)
+            if rel_path and rel_path in self.processed_groups:
+                continue  # 已标记
+            
+            # 检查组内所有文件是否都已存在于目标文件夹中
+            all_found = True
+            for file_path in group:
+                fname = os.path.basename(file_path)
+                if fname not in existing_files:
+                    all_found = False
+                    break
+            
+            if all_found and group:
+                # 自动标记为已处理
+                dest_files = []
+                species = None
+                for file_path in group:
+                    fname = os.path.basename(file_path)
+                    sub = existing_files.get(fname, '')
+                    if sub:
+                        dest_files.append(os.path.join(self.target_dir, sub, fname))
+                        if species is None:
+                            species = sub
+                
+                self.processed_groups.add(rel_path)
+                if dest_files:
+                    self.class_history[rel_path] = {
+                        'species': species or '未知',
+                        'dest_files': dest_files
+                    }
+                newly_found += 1
+        
+        if newly_found > 0:
+            self._save_progress()
+            self._log(f"检测到 {newly_found} 组已手动分好，自动跳过")
+            self.label_status.config(
+                text=f"🔍 检测到 {newly_found} 组已手动分好，自动跳过",
+                fg='#4CAF50'
+            )
     
     def _get_group_rel_path(self, group_index: int = None) -> str:
         """获取当前组的标识（第一个文件的相对路径），用于进度追踪"""
@@ -1298,6 +1565,7 @@ class WildCamSorter:
         del self.class_history[rel_path]
         self.processed_groups.discard(rel_path)
         self._save_progress()
+        self._log(f"撤销分类: 第{group_index+1}组, 删除{deleted_count}个文件")
         
         return deleted_count
     
@@ -1319,6 +1587,7 @@ class WildCamSorter:
         
         # 重置选中状态（默认全选，长度=实际文件数）
         self.selected_flags = [True] * len(self.current_group_files)
+        self.per_file_species.clear()  # 清除上组的独立选择
         
         # 检查该组是否已处理过
         rel_path = self._get_group_rel_path(group_index)
@@ -1336,16 +1605,45 @@ class WildCamSorter:
                 filename = os.path.basename(file_path)
                 
                 if panel_idx == 0 and is_video_file(filename):
-                    # 左上角：视频文件 → 启动视频播放
                     panel.file_path = file_path
                     panel.name_label.config(text=f"🎬 {filename}")
                     self._load_video(file_path, panel)
                 else:
-                    # 显示为静态图片
                     panel.display_image(file_path)
             else:
-                # 该位置无文件
                 panel.display_placeholder()
+        
+        # ---- 溢出文件处理（>4个文件时）----
+        n_extra = len(self.current_group_files) - 4
+        # 清除旧的溢出面板
+        for op in self.overflow_panels:
+            op.frame.destroy()
+        self.overflow_panels.clear()
+        
+        if n_extra > 0:
+            # 显示溢出行
+            self.display_frame.grid_rowconfigure(2, weight=0)
+            self.overflow_frame.grid(row=2, column=0, columnspan=2, sticky='ew', padx=2, pady=2)
+            self.overflow_frame.grid_propagate(False)
+            # 配置溢出行的列权重（等分）
+            for c in range(n_extra):
+                self.overflow_frame.grid_columnconfigure(c, weight=1)
+            
+            for i in range(n_extra):
+                file_idx = 4 + i
+                file_path = self.current_group_files[file_idx]
+                op = MediaPanel(self.overflow_frame, file_idx, f"📷 截图 {file_idx + 1}")
+                op.frame.grid(row=0, column=i, sticky='nsew', padx=2, pady=2)
+                op.set_toggle_callback(self._toggle_file_selection)
+                op.set_fullscreen_callback(self._open_fullscreen)
+                op.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
+                op.display_image(file_path)
+                op.set_selected(self.selected_flags[file_idx])
+                self.overflow_panels.append(op)
+        else:
+            # 隐藏溢出行
+            self.overflow_frame.grid_forget()
+            self.display_frame.grid_rowconfigure(2, weight=0)
         
         # 更新所有面板的选中状态
         self._update_all_panel_selections()
@@ -1367,17 +1665,10 @@ class WildCamSorter:
             )
             self.label_status.config(text="", fg='#AAAAAA')
         
-        # 选中提示（超过4个文件时特别标注）
+        # 选中提示
         n_files = len(self.current_group_files)
         n_selected = sum(self.selected_flags)
-        if n_files > 4:
-            self.label_select_hint.config(
-                text=f"已选 {n_selected}/{n_files} (界面仅显示前4个，+{n_files - 4}个未显示)"
-            )
-        else:
-            self.label_select_hint.config(
-                text=f"已选 {n_selected}/{n_files}"
-            )
+        self.label_select_hint.config(text=f"已选 {n_selected}/{n_files}")
         
         # 更新导航按钮
         self.btn_prev.config(state=tk.NORMAL if group_index > 0 else tk.DISABLED)
@@ -1391,112 +1682,143 @@ class WildCamSorter:
     def _load_video(self, video_path: str, panel: MediaPanel):
         """
         加载视频文件并开始播放。
-        尝试多种opencv后端以提高兼容性（特别是MOV/ProRes等格式）。
+        先尝试opencv（多种后端），失败则用imageio-ffmpeg后备。
         
         参数：
             video_path: 视频文件路径
-            panel: 用于显示视频的 MediaPanel（左上角）
+            panel: 用于显示视频的 MediaPanel
         """
         # 释放旧视频
         if self.video_cap:
             self.video_cap.release()
             self.video_cap = None
+        self._video_reader = None    # imageio reader（后备方案）
+        self._video_frame_iter = None
+        self._video_total_frames = 0
+        self._video_frame_idx = 0
         
-        # 尝试多种后端打开视频（按优先级：FFMPEG → DSHOW → ANY）
+        # ---- 方案1: OpenCV ----
         backends = [cv2.CAP_FFMPEG, cv2.CAP_DSHOW, cv2.CAP_ANY]
-        opened = False
         for backend in backends:
             try:
                 cap = cv2.VideoCapture(video_path, backend)
                 if cap.isOpened():
                     self.video_cap = cap
-                    opened = True
                     break
-                else:
-                    cap.release()
+                cap.release()
             except Exception:
                 continue
         
-        # 如果以上都失败，尝试默认方式 + Windows短路径名后备
-        if not opened:
-            self.video_cap = cv2.VideoCapture(video_path)
-            if not self.video_cap.isOpened():
-                try:
-                    import ctypes
-                    buf = ctypes.create_unicode_buffer(512)
-                    ctypes.windll.kernel32.GetShortPathNameW(video_path, buf, 512)
-                    short_path = buf.value
-                    if short_path and short_path != video_path:
-                        self.video_cap = cv2.VideoCapture(short_path)
-                except Exception:
-                    pass
-        
         if not self.video_cap or not self.video_cap.isOpened():
+            # 短路径名后备
+            try:
+                import ctypes
+                buf = ctypes.create_unicode_buffer(512)
+                ctypes.windll.kernel32.GetShortPathNameW(video_path, buf, 512)
+                short_path = buf.value
+                if short_path and short_path != video_path:
+                    self.video_cap = cv2.VideoCapture(short_path)
+            except Exception:
+                pass
+        
+        # ---- 方案2: imageio-ffmpeg 后备 ----
+        if not self.video_cap or not self.video_cap.isOpened():
+            try:
+                import imageio.v3 as iio
+                self._video_reader = iio.imiter(video_path, plugin='pyav')
+                # 读取第一帧以验证
+                first_frame = next(self._video_reader, None)
+                if first_frame is not None:
+                    # 重建iterator（因为已经消耗了第一帧）
+                    self._video_reader = iio.imiter(video_path, plugin='pyav')
+                    self.video_cap = None  # 使用imageio路径
+                else:
+                    self._video_reader = None
+            except Exception:
+                self._video_reader = None
+        
+        # ---- 全部失败 ----
+        if (not self.video_cap or not self.video_cap.isOpened()) and self._video_reader is None:
             ext = os.path.splitext(video_path)[1].lower()
+            self._log(f"无法播放视频: {video_path}", 'warning')
             panel.media_label.config(
-                image='', text=f"⚠ 无法播放{ext}视频\n编码格式可能不支持\n(可点击查看截图)",
+                image='', text=f"⚠ 无法播放{ext}视频\n(可点击查看截图)",
                 fg='#FFB74D'
             )
             panel.name_label.config(text=f"❌ {os.path.basename(video_path)}")
             self.video_playing = False
-            # 回退：尝试当作静态图片显示（某些"视频"文件可能是图片）
             try:
                 panel.display_image(video_path)
             except Exception:
                 pass
             return
         
-        # 限制目标帧率：相机陷阱视频通常15-30fps，预览用20fps足够流畅
-        fps = self.video_cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0 or fps > 120:
-            fps = 25
-        # 目标20fps（50ms间隔），如果原视频帧率更低则用原帧率
+        # ---- 设置帧率 ----
+        if self.video_cap and self.video_cap.isOpened():
+            fps = self.video_cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0 or fps > 120:
+                fps = 25
+        else:
+            fps = 25  # imageio默认
+        
         target_fps = min(fps, 20)
         self.video_frame_delay = max(25, int(1000 / target_fps))
-        
-        # 保存视频面板引用
         self.video_panel = panel
-        # 缓存视频面板的显示尺寸（在_update_video_frame中更新）
         self._cached_video_dims = (0, 0)
         
-        # 开始播放
         self.video_playing = True
         self._update_video_frame()
     
     def _update_video_frame(self):
         """
-        定时更新视频帧（高度优化版本）。
-        
-        性能策略：
-            1. 全部图像处理用cv2（BGR空间），避免PIL转换开销
-            2. cv2.INTER_NEAREST 缩放（最快，预览场景几乎无差别）
-            3. 只在最后一步转RGB + PhotoImage
-            4. 目标帧率20fps（50ms间隔），剩余时间留给UI响应
-            5. 缓存面板尺寸，避免每帧获取widget尺寸
-            6. 跳帧：如果渲染跟不上，丢弃中间帧
+        定时更新视频帧（支持opencv和imageio双源）。
+        视频播放完毕后自动循环。
         """
-        if not self.video_playing or self.video_cap is None:
+        if not self.video_playing:
             return
         
-        # --- 跳帧机制：读取直到最新帧 ---
-        ret = True
         frame = None
-        grab_count = 0
-        while ret and grab_count < 5:  # 最多连读5帧防止死循环
-            ret, f = self.video_cap.read()
-            if ret:
-                frame = f
-                grab_count += 1
-            else:
-                break
         
-        if frame is None:
-            # 播放完毕，循环
-            self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, frame = self.video_cap.read()
-            if not ret:
+        # ---- 源1: OpenCV ----
+        if self.video_cap and self.video_cap.isOpened():
+            grab_count = 0
+            while grab_count < 5:
+                ret, f = self.video_cap.read()
+                if ret:
+                    frame = f
+                    grab_count += 1
+                else:
+                    break
+            if frame is None:
+                self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = self.video_cap.read()
+                if not ret:
+                    self.video_playing = False
+                    return
+        
+        # ---- 源2: imageio-ffmpeg（后备）----
+        elif self._video_reader is not None:
+            try:
+                frame = next(self._video_reader, None)
+                if frame is None:
+                    # 循环：重建reader
+                    import imageio.v3 as iio
+                    self._video_reader = iio.imiter(self.video_panel.file_path, plugin='pyav')
+                    frame = next(self._video_reader, None)
+            except StopIteration:
+                import imageio.v3 as iio
+                self._video_reader = iio.imiter(self.video_panel.file_path, plugin='pyav')
+                frame = next(self._video_reader, None)
+            except Exception:
                 self.video_playing = False
                 return
+        
+        else:
+            self.video_playing = False
+            return
+        
+        if frame is None:
+            return
         
         # --- 获取视频面板 ---
         panel = getattr(self, 'video_panel', None)
@@ -1519,12 +1841,16 @@ class WildCamSorter:
             new_w, new_h = panel._calc_display_size()
             self._cached_video_dims = (new_w, new_h)
         
-        # --- 渲染帧 ---
+        # --- 渲染帧（opencv BGR 或 imageio RGB）---
         if new_w > 0 and new_h > 0:
-            # 性能关键路径：cv2.resize(BGR→小图) → cv2.cvtColor(BGR→RGB) → Image.fromarray → PhotoImage
-            # 用cv2.INTER_LINEAR缩放（速度与质量的最佳平衡点，比NEAREST清晰很多）
-            frame_small = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
+            if self.video_cap and self.video_cap.isOpened():
+                # OpenCV: BGR → resize → RGB
+                frame_small = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
+            else:
+                # imageio: RGB → resize（PIL更可靠）
+                pil_frame = Image.fromarray(frame)
+                frame_rgb = np.array(pil_frame.resize((new_w, new_h), Image.LANCZOS))
             pil_img = Image.fromarray(frame_rgb)
             self.video_photo = ImageTk.PhotoImage(pil_img)
             panel.media_label.config(image=self.video_photo, text='')
@@ -1553,6 +1879,7 @@ class WildCamSorter:
         if self.video_cap:
             self.video_cap.release()
             self.video_cap = None
+        self._video_reader = None
         self.video_photo = None
         self.video_panel = None
     
@@ -1566,16 +1893,26 @@ class WildCamSorter:
         self.selected_flags[index] = not self.selected_flags[index]
         self._update_all_panel_selections()
         
+        # 联动迷你操作区：取消选中时显示，选中时隐藏
+        if index < 4:
+            panel = self._panels[index]
+        else:
+            # 溢出面板
+            overflow_idx = index - 4
+            panel = self.overflow_panels[overflow_idx] if overflow_idx < len(self.overflow_panels) else None
+        
+        if panel:
+            if not self.selected_flags[index]:
+                panel.show_mini_ops()
+            else:
+                panel.hide_mini_ops()
+                # 清除该文件的独立选择
+                if index in self.per_file_species:
+                    del self.per_file_species[index]
+        
         n_files = len(self.current_group_files)
         n_selected = sum(1 for i, flag in enumerate(self.selected_flags) if flag and i < n_files)
-        if n_files > 4:
-            self.label_select_hint.config(
-                text=f"已选 {n_selected}/{n_files} (界面仅显示前4个，+{n_files - 4}个未显示)"
-            )
-        else:
-            self.label_select_hint.config(
-                text=f"已选 {n_selected}/{n_files}"
-            )
+        self.label_select_hint.config(text=f"已选 {n_selected}/{n_files}")
     
     def _update_all_panel_selections(self):
         """同步所有面板的选中状态视觉样式"""
@@ -1612,6 +1949,15 @@ class WildCamSorter:
         if not self.video_playing and is_video:
             self._toggle_play_pause()
     
+    def _on_panel_species_select(self, file_index: int, selected_species: set):
+        """
+        框内迷你按钮选择回调：记录该文件的独立物种选择。
+        """
+        if selected_species:
+            self.per_file_species[file_index] = selected_species.copy()
+        elif file_index in self.per_file_species:
+            del self.per_file_species[file_index]
+    
     # ==================== 分类操作 ====================
     
     def _on_empty(self):
@@ -1621,10 +1967,64 @@ class WildCamSorter:
         self._classify_files(target_species=None)
     
     def _on_species_click(self, species_name: str):
-        """物种按钮：选中的→物种文件夹，未选中的→空拍文件夹"""
-        if not self.current_group_files:
-            return
-        self._classify_files(target_species=species_name)
+        """物种按钮：多类模式下toggle选中，否则直接分类"""
+        if self.multi_mode:
+            # 多类模式：切换该物种的选中状态
+            if species_name in self.multi_selected:
+                self.multi_selected.discard(species_name)
+            else:
+                self.multi_selected.add(species_name)
+            self._update_multi_buttons()
+        else:
+            # 普通模式：直接分类
+            if not self.current_group_files:
+                return
+            self._classify_files(target_species=species_name)
+    
+    def _toggle_multi_mode(self):
+        """切换多类别模式 / 提交多类别分类"""
+        if self.multi_mode:
+            # 当前在多类模式 → 提交分类
+            if not self.multi_selected:
+                self.label_status.config(text="⚠ 请先选择至少一个物种类别", fg='#FFB74D')
+                return
+            if not self.current_group_files:
+                return
+            selected_count = len(self.multi_selected)
+            # 对每个选中的物种执行分类
+            for species in list(self.multi_selected):
+                self._classify_files(target_species=species)
+            # 退出多类模式
+            self.multi_mode = False
+            self.multi_selected.clear()
+            self.btn_multi.config(text="📋 多类别", bg='#6A1B9A')
+            self._update_multi_buttons()
+            self.label_status.config(
+                text=f"✅ 已分类到 {selected_count} 个类别", fg='#4CAF50'
+            )
+        else:
+            # 进入多类模式
+            self.multi_mode = True
+            self.multi_selected.clear()
+            self.btn_multi.config(text="✅ 完成分类", bg='#E65100')
+            self.label_status.config(
+                text="📋 多类别模式：点击物种按钮选择，完成后点「完成分类」", fg='#CE93D8'
+            )
+            self._update_multi_buttons()
+    
+    def _update_multi_buttons(self):
+        """更新物种按钮外观（多类模式下高亮选中的物种）"""
+        for name, btn in self.species_buttons.items():
+            if self.multi_mode and name in self.multi_selected:
+                btn.config(bg='#FF6F00', text=btn.cget('text').replace('  ✓', '') + '  ✓')
+            elif self.multi_mode:
+                btn.config(bg=COLOR_BUTTON_SPECIES, text=btn.cget('text').replace('  ✓', ''))
+            else:
+                btn.config(bg=COLOR_BUTTON_SPECIES, text=btn.cget('text').replace('  ✓', ''))
+        # 更新新物种按钮（也在多类模式下保持可用）
+        if self.multi_mode:
+            # 如果通过新物种创建了物种，自动加入选中集合
+            pass
     
     def _on_new_species(self):
         """新物种按钮：弹出输入框"""
@@ -1648,6 +2048,15 @@ class WildCamSorter:
             self.species_list.append(species_name)
             self._rebuild_species_buttons()
         
+        # 多类模式下自动选中新物种
+        if self.multi_mode:
+            self.multi_selected.add(species_name)
+            self._update_multi_buttons()
+            self.label_status.config(
+                text=f"📋 新物种「{species_name}」已添加并选中", fg='#CE93D8'
+            )
+            return  # 不立即分类，等用户点「完成分类」
+        
         self._classify_files(target_species=species_name)
     
     def _classify_files(self, target_species: str = None):
@@ -1662,9 +2071,24 @@ class WildCamSorter:
         所有操作都是复制（shutil.copy2），原始文件保留不动。
         """
         if not self.current_group_files or not self.parent_dir:
+            self.label_status.config(
+                text="⚠ 错误：未加载数据或未设置目标文件夹",
+                fg='#FF6B6B'
+            )
             return
         
-        # ---- 撤销旧分类（如果该组之前已处理）----
+        try:
+            self._do_classify(target_species)
+        except Exception as e:
+            self._log(f"分类失败: {e}\n{traceback.format_exc()}", 'error')
+            self.label_status.config(
+                text=f"❌ 分类失败: {e}",
+                fg='#FF6B6B'
+            )
+            import traceback
+            traceback.print_exc()
+    
+    def _do_classify(self, target_species: str = None):
         rel_path = self._get_group_rel_path()
         if rel_path and rel_path in self.processed_groups:
             undone = self._undo_group_copies(self.current_group_index)
@@ -1676,8 +2100,8 @@ class WildCamSorter:
                 self.root.update_idletasks()  # 立即刷新UI
         
         # ---- 执行新的分类复制 ----
-        empty_dir = os.path.join(self.parent_dir, "空拍")
-        species_dir = os.path.join(self.parent_dir, target_species) if target_species else None
+        empty_dir = os.path.join(self.target_dir, "空拍")
+        species_dir = os.path.join(self.target_dir, target_species) if target_species else None
         
         # 确保目标文件夹存在
         os.makedirs(empty_dir, exist_ok=True)
@@ -1690,36 +2114,51 @@ class WildCamSorter:
         dest_files_record = []  # 记录所有复制到的目标路径（用于后续撤销）
         
         for i, file_path in enumerate(self.current_group_files):
-            # 确定目标文件夹
+            # 确定该文件的目标文件夹列表
+            dest_dirs = []
+            is_selected = (i < len(self.selected_flags) and self.selected_flags[i])
+            
             if target_species is None:
-                dest_dir = empty_dir  # 全部→空拍
-            elif i < len(self.selected_flags) and self.selected_flags[i]:
-                dest_dir = species_dir  # 选中→物种
+                # 空拍操作：全部→空拍
+                dest_dirs.append(empty_dir)
+            elif is_selected:
+                # 选中的文件 → 全局目标物种
+                dest_dirs.append(species_dir)
             else:
-                dest_dir = empty_dir  # 未选中→空拍
+                # 取消选中的文件 → 使用框内独立选择的物种
+                local_species = self.per_file_species.get(i, set())
+                if local_species:
+                    for sp in local_species:
+                        sp_dir = os.path.join(self.target_dir, sp)
+                        os.makedirs(sp_dir, exist_ok=True)
+                        dest_dirs.append(sp_dir)
+                else:
+                    # 没有独立选择 → 空拍
+                    dest_dirs.append(empty_dir)
             
             filename = os.path.basename(file_path)
-            dest_path = os.path.join(dest_dir, filename)
             
-            try:
-                # 如果目标已有同名文件（来自其他组的相同文件名），添加数字后缀
-                if os.path.exists(dest_path):
-                    base, ext = os.path.splitext(filename)
-                    counter = 1
-                    while os.path.exists(os.path.join(dest_dir, f"{base}_{counter}{ext}")):
-                        counter += 1
-                    dest_path = os.path.join(dest_dir, f"{base}_{counter}{ext}")
+            for dest_dir in dest_dirs:
+                dest_path = os.path.join(dest_dir, filename)
                 
-                shutil.copy2(file_path, dest_path)
-                dest_files_record.append(dest_path)  # 记录目标路径
-                
-                if dest_dir == species_dir:
-                    copied_species += 1
-                else:
-                    copied_empty += 1
+                try:
+                    if os.path.exists(dest_path):
+                        base, ext = os.path.splitext(filename)
+                        counter = 1
+                        while os.path.exists(os.path.join(dest_dir, f"{base}_{counter}{ext}")):
+                            counter += 1
+                        dest_path = os.path.join(dest_dir, f"{base}_{counter}{ext}")
                     
-            except Exception as e:
-                errors.append(f"  {filename}: {e}")
+                    shutil.copy2(file_path, dest_path)
+                    dest_files_record.append(dest_path)
+                    
+                    if dest_dir == species_dir:
+                        copied_species += 1
+                    elif dest_dir == empty_dir:
+                        copied_empty += 1
+                        
+                except Exception as e:
+                    errors.append(f"  {filename}: {e}")
         
         # 标记为已处理（带分类详情）
         self._mark_group_processed(
@@ -1727,6 +2166,13 @@ class WildCamSorter:
             species=target_species,
             dest_files=dest_files_record
         )
+        
+        # 日志记录
+        species_label = target_species if target_species else "空拍"
+        self._log(f"分类 第{self.current_group_index+1}组 → 「{species_label}」: 物种{copied_species}个, 空拍{copied_empty}个" + 
+                  (f", 错误{len(errors)}个" if errors else ""))
+        if errors:
+            self._log(f"分类错误详情: {errors}", 'warning')
         
         # ---- CSV记录（所有分类均记录：空拍 + 物种）----
         self._write_csv_record(target_species if target_species else "空拍")
@@ -1773,11 +2219,11 @@ class WildCamSorter:
         参数：
             species_name: 物种名称
         """
-        if not self.parent_dir:
+        if not self.target_dir:
             return
         
-        # CSV文件路径：保存在目标父文件夹下
-        csv_path = os.path.join(self.parent_dir, 'wildcam_records.csv')
+        # CSV文件路径：保存在目标文件夹下
+        csv_path = os.path.join(self.target_dir, 'wildcam_records.csv')
         
         # ---- 从当前组文件中提取GPS和时间 ----
         gps_data = {'longitude': None, 'latitude': None, 'altitude': None, 'datetime': None}
@@ -1840,12 +2286,22 @@ class WildCamSorter:
         icons = ["🐾", "🦌", "🐗", "🐻", "🐺", "🦊", "🐵", "🐮", "🐴", "🐑",
                  "🐰", "🦃", "🦅", "🦉", "🐍", "🦎", "🐢", "🦔", "🐿", "🦡"]
         
+        # 自动换行：每行最多7个按钮，超出换到下一行
+        MAX_PER_ROW = 7
+        # 创建行容器
+        row_frames = []
         for i, name in enumerate(self.species_list):
+            row_idx = i // MAX_PER_ROW
+            if row_idx >= len(row_frames):
+                row_frame = tk.Frame(self.species_frame, bg='#1A1A1A')
+                row_frame.pack(fill=tk.X, pady=1)
+                row_frames.append(row_frame)
+            
             key_label = f" [{KEY_SPECIES_KEYS[i].upper()}]" if i < len(KEY_SPECIES_KEYS) else ""
             icon = icons[i % len(icons)]
             
             btn = tk.Button(
-                self.species_frame,
+                row_frames[row_idx],
                 text=f"{icon} {name}{key_label}",
                 font=("微软雅黑", 11),
                 bg=COLOR_BUTTON_SPECIES, fg='white',
@@ -1856,6 +2312,14 @@ class WildCamSorter:
             )
             btn.pack(side=tk.LEFT, padx=3)
             self.species_buttons[name] = btn
+        
+        # 刷新所有面板的迷你按钮
+        for panel in self._panels:
+            if hasattr(panel, 'rebuild_mini_buttons'):
+                panel.rebuild_mini_buttons(self.species_list)
+        for panel in self.overflow_panels:
+            if hasattr(panel, 'rebuild_mini_buttons'):
+                panel.rebuild_mini_buttons(self.species_list)
     
     # ==================== 导航 ====================
     
@@ -1930,8 +2394,54 @@ class WildCamSorter:
     
     def _on_close(self):
         """关闭窗口清理"""
+        self._log(f"程序关闭")
         self._stop_video()
         self.root.destroy()
+    
+    # ==================== 日志系统 ====================
+    
+    def _setup_logging(self):
+        """初始化日志系统：轮转文件处理器，单文件最大5MB，保留3个备份"""
+        self.logger = logging.getLogger('WildCamSorter')
+        self.logger.setLevel(logging.DEBUG)
+        # 日志文件将在首次打开文件夹时创建（需要target_dir）
+        self._log_handler = None
+    
+    def _ensure_log_handler(self):
+        """确保日志handler已创建（需要target_dir）"""
+        if self._log_handler is not None:
+            return
+        if not self.target_dir:
+            return
+        try:
+            log_path = os.path.join(self.target_dir, 'wildcam_sorter.log')
+            handler = RotatingFileHandler(
+                log_path, maxBytes=5*1024*1024, backupCount=3,
+                encoding='utf-8'
+            )
+            handler.setLevel(logging.DEBUG)
+            formatter = logging.Formatter(
+                '%(asctime)s [%(levelname)s] %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self._log_handler = handler
+        except Exception:
+            pass
+    
+    def _log(self, msg: str, level: str = 'info'):
+        """安全日志记录：不因日志错误影响主程序"""
+        try:
+            self._ensure_log_handler()
+            if level == 'error':
+                self.logger.error(msg)
+            elif level == 'warning':
+                self.logger.warning(msg)
+            else:
+                self.logger.info(msg)
+        except Exception:
+            pass  # 日志失败不影响程序运行
     
     def run(self):
         """启动应用主循环"""
