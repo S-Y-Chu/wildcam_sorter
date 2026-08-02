@@ -43,6 +43,8 @@ import re
 import csv
 import shutil
 import logging
+import queue
+import threading
 import traceback
 from pathlib import Path
 from datetime import datetime
@@ -1212,12 +1214,15 @@ class WildCamSorter:
         self.progress_file = None         # 进度文件路径
         
         # ===== 视频播放状态 =====
-        self.video_cap = None             # cv2.VideoCapture 对象
+        self.video_cap = None             # cv2.VideoCapture 对象（解码线程内使用）
         self.video_playing = False        # 是否正在播放
         self.video_fps = 25               # 视频帧率
-        self.video_frame_delay = 40       # 帧间延迟（毫秒）
+        self.video_frame_delay = 50       # 帧间延迟（毫秒，20fps显示）
         self.video_after_id = None        # after() 调度 ID
         self.video_photo = None           # 保持视频帧 PhotoImage 引用
+        self._video_thread = None         # 视频解码线程
+        self._video_queue = None          # 帧队列（解码线程→UI线程）
+        self._video_stop = None           # 停止事件
         
         # ===== UI 状态 =====
         self._panels = []                 # MediaPanel 列表（4个）
@@ -1918,193 +1923,231 @@ class WildCamSorter:
     
     def _load_video(self, video_path: str, panel: MediaPanel):
         """
-        加载视频文件并开始播放。
+        加载视频文件并开始播放（解码在子线程，UI永不卡死）。
         先尝试opencv（多种后端），失败则用PyAV后备。
         
         参数：
             video_path: 视频文件路径
             panel: 用于显示视频的 MediaPanel
         """
-        # 释放旧视频
-        if self.video_cap:
-            self.video_cap.release()
-            self.video_cap = None
-        self._av_container = None    # PyAV 容器（后备方案）
-        self._av_frame_iter = None
-        self._video_total_frames = 0
-        self._video_frame_idx = 0
+        # 停止旧视频（含旧线程）
+        self._stop_video()
         
-        # ---- 方案1: OpenCV ----
-        backends = [cv2.CAP_FFMPEG, cv2.CAP_DSHOW, cv2.CAP_ANY]
-        for backend in backends:
-            try:
-                cap = cv2.VideoCapture(video_path, backend)
-                if cap.isOpened():
-                    self.video_cap = cap
-                    break
-                cap.release()
-            except Exception:
-                continue
+        self.video_panel = panel
+        self.video_playing = True
+        self._cached_video_dims = (0, 0)
         
-        if not self.video_cap or not self.video_cap.isOpened():
-            # 短路径名后备
-            try:
-                import ctypes
-                buf = ctypes.create_unicode_buffer(512)
-                ctypes.windll.kernel32.GetShortPathNameW(video_path, buf, 512)
-                short_path = buf.value
-                if short_path and short_path != video_path:
-                    self.video_cap = cv2.VideoCapture(short_path)
-            except Exception:
-                pass
+        # 启动解码线程（daemon线程，解码卡住也不影响UI）
+        self._video_stop = threading.Event()
+        self._video_queue = queue.Queue(maxsize=2)
+        self._video_thread = threading.Thread(
+            target=self._video_decode_worker,
+            args=(video_path,),
+            daemon=True
+        )
+        self._video_thread.start()
         
-        # ---- 方案2: PyAV 后备（av.open + frame.to_image，轻量且稳定）----
-        if not self.video_cap or not self.video_cap.isOpened():
-            try:
-                import av
-                self._av_container = av.open(video_path)
-                # 验证存在视频流
-                if not self._av_container.streams.video:
-                    self._av_container.close()
-                    self._av_container = None
-                else:
-                    # 预读第一帧验证可解码
-                    self._av_frame_iter = self._av_container.decode(video=0)
-                    first_frame = next(self._av_frame_iter, None)
-                    if first_frame is None:
-                        self._av_container.close()
-                        self._av_container = None
+        # 启动显示循环（UI线程只取帧显示，不解码）
+        self.video_frame_delay = 50  # 20fps显示
+        self._update_video_frame()
+    
+    def _video_decode_worker(self, video_path: str):
+        """
+        视频解码线程：持续读帧转RGB放入队列，循环播放。
+        所有可能阻塞的解码操作都在此线程，UI线程只消费队列。
+        """
+        cap = None
+        av_container = None
+        av_iter = None
+        fps = 25
+        
+        try:
+            # ---- 方案1: OpenCV ----
+            for backend in [cv2.CAP_FFMPEG, cv2.CAP_DSHOW, cv2.CAP_ANY]:
+                try:
+                    c = cv2.VideoCapture(video_path, backend)
+                    if c.isOpened():
+                        cap = c
+                        break
+                    c.release()
+                except Exception:
+                    continue
+            if cap is None or not cap.isOpened():
+                try:
+                    import ctypes
+                    buf = ctypes.create_unicode_buffer(512)
+                    ctypes.windll.kernel32.GetShortPathNameW(video_path, buf, 512)
+                    short_path = buf.value
+                    if short_path and short_path != video_path:
+                        cap = cv2.VideoCapture(short_path)
+                except Exception:
+                    pass
+            
+            # ---- 方案2: PyAV 后备 ----
+            if cap is None or not cap.isOpened():
+                try:
+                    import av
+                    av_container = av.open(video_path)
+                    if not av_container.streams.video:
+                        av_container.close()
+                        av_container = None
                     else:
-                        self.video_cap = None  # 使用PyAV路径
-            except Exception:
-                self._av_container = None
-        
-        # ---- 全部失败 ----
-        if (not self.video_cap or not self.video_cap.isOpened()) and self._av_container is None:
-            ext = os.path.splitext(video_path)[1].lower()
-            self._log(f"无法播放视频: {video_path}", 'warning')
+                        av_iter = av_container.decode(video=0)
+                        # 预读一帧验证
+                        if next(av_iter, None) is None:
+                            av_container.close()
+                            av_container = None
+                except Exception:
+                    av_container = None
+            
+            # 获取帧率（限制显示节奏用）
+            if cap and cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS)
+            if not (0 < fps <= 120):
+                fps = 25
+            
+            source = cap if (cap and cap.isOpened()) else av_container
+            if source is None:
+                # 全部失败：通知UI显示错误
+                self.root.after(0, lambda: self._video_load_failed(video_path))
+                return
+            
+            # ---- 解码循环 ----
+            fail_count = 0  # 连续读取失败计数，防止死循环
+            while not self._video_stop.is_set():
+                frame = None
+                if cap is not None and cap.isOpened():
+                    # 跳帧：连读最多3帧取最新，避免解码慢于显示时堆积
+                    for _ in range(3):
+                        ret, f = cap.read()
+                        if ret:
+                            frame = f
+                        else:
+                            break
+                    if frame is None:
+                        # 播放完，循环；但连续失败过多说明视频不可读，退出
+                        fail_count += 1
+                        if fail_count > 50:
+                            break
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, frame = cap.read()
+                        if not ret:
+                            continue
+                    else:
+                        fail_count = 0
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                elif av_container is not None:
+                    try:
+                        av_frame = next(av_iter, None)
+                        if av_frame is None:
+                            # 循环：seek到开头
+                            av_container.seek(0)
+                            av_iter = av_container.decode(video=0)
+                            av_frame = next(av_iter, None)
+                        if av_frame is None:
+                            fail_count += 1
+                            if fail_count > 50:
+                                break
+                            continue
+                        fail_count = 0
+                        frame_rgb = np.array(av_frame.to_image())
+                    except StopIteration:
+                        av_container.seek(0)
+                        av_iter = av_container.decode(video=0)
+                        continue
+                    except Exception:
+                        break
+                else:
+                    break
+                
+                # 放入队列（满则丢弃最旧帧，保证队列不阻塞线程）
+                try:
+                    self._video_queue.put_nowait(frame_rgb)
+                except queue.Full:
+                    try:
+                        self._video_queue.get_nowait()
+                        self._video_queue.put_nowait(frame_rgb)
+                    except Exception:
+                        pass
+        except Exception:
+            pass  # 解码线程异常不影响UI
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if av_container is not None:
+                try:
+                    av_container.close()
+                except Exception:
+                    pass
+    
+    def _video_load_failed(self, video_path: str):
+        """视频完全无法打开时显示错误提示"""
+        if not self.video_playing:
+            return
+        ext = os.path.splitext(video_path)[1].lower()
+        self._log(f"无法播放视频: {video_path}", 'warning')
+        panel = getattr(self, 'video_panel', None)
+        if panel:
             panel.media_label.config(
                 image='', text=f"⚠ 无法播放{ext}视频\n(可点击查看截图)",
                 fg='#FFB74D'
             )
             panel.title_label.config(text=f"{panel.label_text} | ❌ {os.path.basename(video_path)}")
-            self.video_playing = False
             try:
                 panel.display_image(video_path)
             except Exception:
                 pass
-            return
-        
-        # ---- 设置帧率 ----
-        if self.video_cap and self.video_cap.isOpened():
-            fps = self.video_cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0 or fps > 120:
-                fps = 25
-        else:
-            fps = 25  # PyAV默认
-        
-        target_fps = min(fps, 20)
-        self.video_frame_delay = max(25, int(1000 / target_fps))
-        self.video_panel = panel
-        self._cached_video_dims = (0, 0)
-        
-        self.video_playing = True
-        self._update_video_frame()
+        self.video_playing = False
     
     def _update_video_frame(self):
         """
-        定时更新视频帧（支持opencv和PyAV双源）。
-        视频播放完毕后自动循环。
+        定时从解码队列取帧并显示（UI线程不解码，绝不卡死）。
+        视频播放完毕后由解码线程自动循环。
         """
         if not self.video_playing:
             return
         
-        frame = None
+        # 非阻塞取帧（无帧则保留上一帧，等下一轮）
+        try:
+            frame_rgb = self._video_queue.get_nowait()
+        except (queue.Empty, AttributeError):
+            frame_rgb = None
         
-        # ---- 源1: OpenCV ----
-        if self.video_cap and self.video_cap.isOpened():
-            grab_count = 0
-            while grab_count < 5:
-                ret, f = self.video_cap.read()
-                if ret:
-                    frame = f
-                    grab_count += 1
-                else:
-                    break
-            if frame is None:
-                self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret, frame = self.video_cap.read()
-                if not ret:
-                    self.video_playing = False
-                    return
-        
-        # ---- 源2: PyAV（后备）----
-        elif self._av_container is not None:
-            try:
-                frame = next(self._av_frame_iter, None)
-                if frame is None:
-                    # 循环：seek到开头重新解码
-                    self._av_container.seek(0)
-                    self._av_frame_iter = self._av_container.decode(video=0)
-                    frame = next(self._av_frame_iter, None)
-            except StopIteration:
-                self._av_container.seek(0)
-                self._av_frame_iter = self._av_container.decode(video=0)
-                frame = next(self._av_frame_iter, None)
-            except Exception:
-                self.video_playing = False
-                return
-            if frame is not None:
-                # VideoFrame → PIL Image（RGB）
-                frame = frame.to_image()
-        
-        else:
-            self.video_playing = False
-            return
-        
-        if frame is None:
-            return
-        
-        # --- 获取视频面板 ---
         panel = getattr(self, 'video_panel', None)
         if panel is None:
             panel = self._panels[0] if self._panels else None
-            if panel is None:
-                self.video_playing = False
-                return
         
-        # --- 获取/刷新缓存的面板显示尺寸 ---
-        # 每30帧重新获取一次面板尺寸（适应窗口大小变化）
-        if not hasattr(self, '_frame_count'):
-            self._frame_count = 0
-        self._frame_count += 1
+        if frame_rgb is not None and panel is not None:
+            # --- 获取/刷新缓存的面板显示尺寸（每30帧刷新一次）---
+            if not hasattr(self, '_frame_count'):
+                self._frame_count = 0
+            self._frame_count += 1
+            if self._frame_count % 30 == 0:
+                self._cached_video_dims = panel._calc_display_size()
+            new_w, new_h = self._cached_video_dims
+            if new_w <= 0:
+                new_w, new_h = panel._calc_display_size()
+                self._cached_video_dims = (new_w, new_h)
+            
+            # 渲染帧（RGB numpy → 缩放 → PhotoImage）
+            if new_w > 0 and new_h > 0:
+                try:
+                    pil_img = Image.fromarray(frame_rgb)
+                    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+                    self.video_photo = ImageTk.PhotoImage(pil_img)
+                    panel.media_label.config(image=self.video_photo, text='')
+                except Exception:
+                    pass
         
-        if self._frame_count % 30 == 0:
-            self._cached_video_dims = panel._calc_display_size()
-        new_w, new_h = self._cached_video_dims
-        if new_w <= 0:
-            new_w, new_h = panel._calc_display_size()
-            self._cached_video_dims = (new_w, new_h)
-        
-        # --- 渲染帧（opencv BGR 或 PyAV RGB）---
-        if new_w > 0 and new_h > 0:
-            if self.video_cap and self.video_cap.isOpened():
-                # OpenCV: BGR → resize → RGB
-                frame_small = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
-            else:
-                # PyAV: 已经是PIL Image（RGB），直接缩放
-                frame_rgb = np.array(frame.resize((new_w, new_h), Image.LANCZOS))
-            pil_img = Image.fromarray(frame_rgb)
-            self.video_photo = ImageTk.PhotoImage(pil_img)
-            panel.media_label.config(image=self.video_photo, text='')
-        
-        # --- 调度下一帧 ---
+        # --- 调度下一帧显示 ---
         self.video_after_id = self.root.after(self.video_frame_delay, self._update_video_frame)
     
     def _toggle_play_pause(self):
         """切换视频播放/暂停状态"""
-        if self.video_cap is None:
+        if not hasattr(self, '_video_thread') or self._video_thread is None:
             return
         self.video_playing = not self.video_playing
         if self.video_playing:
@@ -2115,21 +2158,24 @@ class WildCamSorter:
                 self.video_after_id = None
     
     def _stop_video(self):
-        """停止视频播放并释放资源"""
+        """停止视频播放，结束解码线程并释放资源"""
         self.video_playing = False
         if self.video_after_id:
             self.root.after_cancel(self.video_after_id)
             self.video_after_id = None
-        if self.video_cap:
-            self.video_cap.release()
-            self.video_cap = None
-        if self._av_container is not None:
+        # 通知解码线程退出并等待（超时2秒，避免阻塞UI）
+        if hasattr(self, '_video_stop'):
+            self._video_stop.set()
+        if hasattr(self, '_video_thread') and self._video_thread is not None:
+            self._video_thread.join(timeout=2)
+            self._video_thread = None
+        # 清空队列
+        if hasattr(self, '_video_queue'):
             try:
-                self._av_container.close()
+                while True:
+                    self._video_queue.get_nowait()
             except Exception:
                 pass
-            self._av_container = None
-        self._av_frame_iter = None
         self.video_photo = None
         self.video_panel = None
     

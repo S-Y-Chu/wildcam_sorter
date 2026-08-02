@@ -37,7 +37,7 @@ exe = EXE(
     name='WildCamSorter',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
+    strip=False,
     upx=True,
     console=False,
     disable_windowed_traceback=False,
@@ -50,8 +50,9 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    strip=True,
+    strip=False,
     upx=True,
-    upx_exclude=[],
+    # 所有DLL不压缩（UPX压缩DLL会导致加载卡死），只压缩exe和pyd
+    upx_exclude=['*.dll'],
     name='WildCamSorter',
 )
