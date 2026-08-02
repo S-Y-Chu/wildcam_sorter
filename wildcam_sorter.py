@@ -350,40 +350,42 @@ class MediaPanel:
         self.frame = tk.Frame(
             parent,
             bg=COLOR_PANEL_BG,
-            highlightthickness=3,      # 边框粗细
+            highlightthickness=1,      # 细边框（减少黑边）
             highlightbackground=COLOR_SELECTED_BORDER  # 默认绿色（选中）
         )
         
-        # 面板标题（顶部居中，缩小padding减少黑边）
+        # 面板标题（顶部，显示标题+文件名，节省一行空间给图片）
         self.title_label = tk.Label(
             self.frame,
             text=label_text,
-            font=("微软雅黑", 10, "bold"),
+            font=("微软雅黑", 9, "bold"),
             bg=COLOR_PANEL_BG,
-            fg=COLOR_TEXT
+            fg=COLOR_TEXT,
+            anchor=tk.W
         )
-        self.title_label.pack(side=tk.TOP, pady=(2, 0))
+        self.title_label.pack(side=tk.TOP, fill=tk.X, pady=(1, 0))
         
-        # 媒体显示标签（占据主要空间）
+        # 媒体显示标签（占据主要空间，图片顶部对齐向下延伸）
         self.media_label = tk.Label(
             self.frame,
             bg=COLOR_PANEL_BG,
             fg=COLOR_TEXT_DIM,
             text="等待加载...",
-            font=("微软雅黑", 12)
+            font=("微软雅黑", 12),
+            anchor='n'  # 图片顶部对齐：上边界不动，下边界随高度下移
         )
-        self.media_label.pack(fill=tk.BOTH, expand=True, padx=2, pady=1)
+        self.media_label.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
         
-        # 文件名标签（底部）
+        # 文件名标签：不再单独占一行，文件名合并进标题行
         self.name_label = tk.Label(
             self.frame,
             text="",
-            font=("微软雅黑", 8),
+            font=("微软雅黑", 7),
             bg=COLOR_PANEL_BG,
             fg=COLOR_TEXT_DIM,
             anchor=tk.W
         )
-        self.name_label.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=1)
+        # 不 pack，节省高度给图片
         
         # 右上角切换按钮（明显的按钮样式，点击切换选中/取消选中）
         self.select_btn = tk.Button(
@@ -433,15 +435,18 @@ class MediaPanel:
             self.select_btn.config(text="✗ 取消", bg=COLOR_UNSELECTED_BORDER,
                                    activebackground='#EF5350')
     
-    def display_image(self, image_path: str):
+    def display_image(self, image_path: str, retry: int = 0):
         """
         显示静态图片，按3:2比例缩放后居中显示。
+        如果面板尚未渲染导致尺寸无效，自动重试最多3次。
         
         参数：
             image_path: 图片文件路径
+            retry: 当前重试次数（内部使用）
         """
         self.file_path = image_path
-        self.name_label.config(text=f"📷 {os.path.basename(image_path)}")
+        # 文件名合并到标题行显示
+        self.title_label.config(text=f"{self.label_text} | {os.path.basename(image_path)}")
         
         try:
             pil_img = Image.open(image_path)
@@ -449,22 +454,29 @@ class MediaPanel:
             if photo:
                 self._photo = photo
                 self.media_label.config(image=photo, text='')
+            elif retry < 3:
+                # 面板尚未渲染完成，延迟后重试
+                self.media_label.config(image='', text="")
+                self.frame.after(150, lambda: self.display_image(image_path, retry + 1))
             else:
                 self.media_label.config(image='', text="等待渲染...")
         except Exception as e:
             self.media_label.config(image='', text=f"⚠ 加载失败\n{os.path.basename(image_path)}")
-            self.name_label.config(text=f"❌ {e}")
+            self.title_label.config(text=f"{self.label_text} | ❌ {e}")
     
     def display_placeholder(self, text: str = "(无文件)"):
         """显示占位文本（当没有对应文件时）"""
         self.file_path = None
         self._photo = None
         self.media_label.config(image='', text=text)
-        self.name_label.config(text="")
+        self.title_label.config(text=self.label_text)
         self.set_selected(False)
     
     def _calc_display_size(self):
-        """计算当前面板内媒体的最佳显示尺寸（保持3:2比例），返回 (宽, 高) 或 (0,0)"""
+        """
+        计算当前面板内媒体的最佳显示尺寸（保持3:2比例），返回 (宽, 高) 或 (0,0)。
+        基于 frame 尺寸减去标题栏估算（文件名已合并进标题，不占高度）。
+        """
         panel_w = self.frame.winfo_width()
         panel_h = self.frame.winfo_height()
         if panel_w <= 10:
@@ -473,18 +485,23 @@ class MediaPanel:
             panel_h = self.frame.winfo_reqheight()
         if panel_w <= 20 or panel_h <= 40:
             return (0, 0)
-        # 扣除标题栏(~18px) + 文件名栏(~14px) + 极小padding，最大化媒体显示面积
-        available_w = panel_w - 6
-        available_h = panel_h - 30
+        # 仅扣除极小标题空间（~10px），其余全部让给图片：
+        # 图片高度≈面板高度，底部必然贴满，无黑边
+        available_w = panel_w - 4
+        available_h = panel_h - 10
+        # 如果迷你标签栏可见（place），再扣除其高度
+        try:
+            self.mini_frame.place_info()
+            available_h -= 55
+        except (tk.TclError, AttributeError):
+            pass
         if available_w <= 0 or available_h <= 0:
             return (0, 0)
-        available_ratio = available_w / available_h
-        if available_ratio > MEDIA_ASPECT_RATIO:
-            new_h = available_h
-            new_w = int(new_h * MEDIA_ASPECT_RATIO)
-        else:
-            new_w = available_w
-            new_h = int(new_w / MEDIA_ASPECT_RATIO)
+        # 始终高度优先（保持3:2比例），宽度超出部分由Label裁剪：
+        # 保证图片上下边界完全贴满，底部无黑边
+        # +5px 溢出保险，确保贴满
+        new_h = available_h + 5
+        new_w = int(new_h * MEDIA_ASPECT_RATIO)
         return (max(new_w, 1), max(new_h, 1))
     
     def _resize_and_center(self, pil_img: Image.Image) -> ImageTk.PhotoImage:
@@ -503,137 +520,341 @@ class MediaPanel:
     
     def setup_mini_ops(self, species_list: list, on_select: callable, on_multi: callable):
         """
-        创建迷你物种按钮（在取消选中时显示）。
+        创建迷你物种按钮栏（常驻显示，给照片打标签用）。
+        
+        逻辑：
+            - 迷你栏的按钮只是给当前照片「打标签」（选择类别）
+            - 真正复制分类由下方主操作区按钮触发
+            - 主分类时：有标签的照片按标签去对应文件夹，
+              没有标签的照片跟随主操作区选定的类别
         
         参数：
             species_list: 物种名称列表
-            on_select: 点击物种按钮的回调(species_name)
-            on_multi: 点击多类别按钮的回调
+            on_select: 标签更新回调(file_index, species_set)
+            on_multi: 保留参数（未使用）
         """
-        # 迷你操作区容器（初始隐藏，用place定位到面板底部）
-        self.mini_frame = tk.Frame(self.frame, bg=COLOR_PANEL_BG, height=32)
-        self.mini_frame.pack_propagate(False)  # 固定32px高
-        # 不立即显示，等待show_mini_ops()调用
+        # 迷你操作区容器（用place定位，默认隐藏）
+        self.mini_frame = tk.Frame(self.frame, bg=COLOR_PANEL_BG, height=55)
+        self.mini_frame.pack_propagate(False)
+        # 不在 __init__ 中 pack，由 show/hide 用 place 控制显示
+        # 第一行：物种按钮
+        self.mini_species_row = tk.Frame(self.mini_frame, bg=COLOR_PANEL_BG)
+        self.mini_species_row.pack(fill=tk.X)
+        # 第二行：功能按钮（多类别/完成分类/刷新）
+        self.mini_func_row = tk.Frame(self.mini_frame, bg=COLOR_PANEL_BG)
+        self.mini_func_row.pack(fill=tk.X)
         
         self.mini_buttons = {}
         self.mini_multi_on = False
-        self.mini_selected = set()
+        self.mini_selected = set()       # 多类模式下临时选择
         self._mini_on_select = on_select
         self._mini_on_multi = on_multi
         
-        # 创建迷你按钮（小字体，紧凑间距）
-        icons = ["🐾","🦌","🐗","🐻","🐺","🦊","🐵","🐮","🐴","🐑","🐰","🦃","🦅","🦉","🐍","🦎","🐢","🦔","🐿","🦡"]
-        for i, name in enumerate(species_list[:12]):  # 最多12个迷你按钮
-            icon = icons[i % len(icons)]
+        # 创建物种按钮（小字体，紧凑）
+        for i, name in enumerate(species_list[:8]):  # 每行最多8个
             btn = tk.Button(
-                self.mini_frame,
-                text=f"{icon}{name[:2]}",  # 图标+物种名前2字
+                self.mini_species_row,
+                text=name,
                 font=("微软雅黑", 8),
                 bg=COLOR_BUTTON_SPECIES, fg='white',
                 activebackground='#43A047',
                 relief=tk.FLAT, cursor='hand2',
-                padx=4, pady=1,
+                padx=3, pady=0,
                 command=lambda n=name: self._on_mini_species(n)
             )
-            btn.pack(side=tk.LEFT, padx=1)
+            btn.pack(side=tk.LEFT, padx=1, pady=1)
             self.mini_buttons[name] = btn
         
-        # 迷你多类别按钮
+        # 迷你多类别按钮（进入多类模式后变「完成分类」）
         self.mini_multi_btn = tk.Button(
-            self.mini_frame,
-            text="📋", font=("微软雅黑", 8),
+            self.mini_func_row,
+            text="📋 多类别", font=("微软雅黑", 8),
             bg='#6A1B9A', fg='white',
             relief=tk.FLAT, cursor='hand2',
-            padx=4, pady=1,
+            padx=4, pady=0,
             command=self._on_mini_multi
         )
-        self.mini_multi_btn.pack(side=tk.LEFT, padx=1)
+        self.mini_multi_btn.pack(side=tk.LEFT, padx=1, pady=1)
+        
+        # 迷你刷新按钮
+        self.mini_refresh_btn = tk.Button(
+            self.mini_func_row,
+            text="🔄", font=("微软雅黑", 8),
+            bg='#455A64', fg='white',
+            relief=tk.FLAT, cursor='hand2',
+            padx=4, pady=0,
+            command=self._on_mini_refresh
+        )
+        self.mini_refresh_btn.pack(side=tk.LEFT, padx=1, pady=1)
+        
+        # 标签状态标签（显示已选标签，如「已标:牛」）
+        self.mini_label_text = tk.Label(
+            self.mini_func_row, text="", font=("微软雅黑", 8),
+            bg=COLOR_PANEL_BG, fg='#FFB74D'
+        )
+        self.mini_label_text.pack(side=tk.LEFT, padx=4, pady=1)
+    
+    def _on_mini_refresh(self):
+        """刷新迷你按钮：从主界面重新获取物种列表"""
+        if hasattr(self, 'on_refresh_callback') and self.on_refresh_callback:
+            self.on_refresh_callback(self.index)
+    
+    def set_refresh_callback(self, callback):
+        """设置刷新回调（从主界面获取最新物种列表）"""
+        self.on_refresh_callback = callback
     
     def _on_mini_species(self, name: str):
-        """迷你物种按钮点击：多类模式下toggle，否则直接选择"""
+        """迷你物种按钮点击：单选直接打标签，多类模式toggle选择"""
         if self.mini_multi_on:
+            # 多类模式：toggle 临时选择
             if name in self.mini_selected:
                 self.mini_selected.discard(name)
             else:
                 self.mini_selected.add(name)
             self._update_mini_buttons()
         else:
-            # 单选模式：清除其他选择，只选这一个
+            # 单选模式：立即打上标签（只这一个）
             self.mini_selected = {name}
             self._update_mini_buttons()
-            # 直接通过回调通知
-            if self._mini_on_select:
-                self._mini_on_select(self.index, self.mini_selected)
+            self._notify_label()
     
     def _on_mini_multi(self):
-        """迷你多类别按钮"""
+        """迷你多类别按钮：进入多类模式 / 完成分类提交标签"""
         if self.mini_multi_on:
-            # 完成选择 → 通知回调
-            if self._mini_on_select:
-                self._mini_on_select(self.index, self.mini_selected)
+            # 完成分类：提交标签，迷你栏保持显示
             self.mini_multi_on = False
-            self.mini_multi_btn.config(text="📋", bg='#6A1B9A')
-            # 完成后自动隐藏迷你操作区
-            self.hide_mini_ops()
+            self.mini_multi_btn.config(text="📋 多类别", bg='#6A1B9A')
+            self._notify_label()
         else:
             # 进入多类模式
             self.mini_multi_on = True
-            self.mini_multi_btn.config(text="✅", bg='#E65100')
+            self.mini_multi_btn.config(text="✅ 完成分类", bg='#E65100')
             self.mini_selected.clear()
             self._update_mini_buttons()
     
+    def _notify_label(self):
+        """通知主界面当前照片的标签"""
+        if self._mini_on_select:
+            self._mini_on_select(self.index, set(self.mini_selected))
+        # 更新标签状态文字
+        if self.mini_selected:
+            self.mini_label_text.config(text=f"已标:{'、'.join(list(self.mini_selected)[:3])}")
+        else:
+            self.mini_label_text.config(text="")
+    
     def _update_mini_buttons(self):
-        """更新迷你按钮外观"""
+        """更新迷你按钮外观（已选标签变橙色）"""
         for name, btn in self.mini_buttons.items():
             if name in self.mini_selected:
                 btn.config(bg='#FF6F00')
             else:
                 btn.config(bg=COLOR_BUTTON_SPECIES)
     
-    def show_mini_ops(self):
-        """显示迷你操作区（使用place确保可靠显示）"""
-        if not hasattr(self, 'mini_frame'):
-            return
-        # 用place固定在面板底部（name_label上方）
-        self.mini_frame.place(relx=0, rely=1.0, anchor='sw', relwidth=1.0, y=-20)
-        self.mini_frame.lift()
+    def clear_mini_selection(self):
+        """清空该照片的标签并隐藏迷你栏（组切换/分类完成时调用）"""
         self.mini_selected.clear()
         self.mini_multi_on = False
-        if hasattr(self, 'mini_multi_btn') and self.mini_multi_btn.winfo_exists():
-            self.mini_multi_btn.config(text="📋", bg='#6A1B9A')
+        self.mini_multi_btn.config(text="📋 多类别", bg='#6A1B9A')
+        self.mini_label_text.config(text="")
         self._update_mini_buttons()
+        self.hide_mini_ops()
+    
+    def show_mini_ops(self):
+        """显示迷你标签栏（place定位，绝对可靠）"""
+        if not hasattr(self, 'mini_frame'):
+            return
+        self.mini_frame.place(relx=0, rely=1.0, anchor='sw', relwidth=1.0, y=-2)
+        self.mini_frame.lift()
     
     def hide_mini_ops(self):
-        """隐藏迷你操作区"""
+        """隐藏迷你标签栏"""
         if not hasattr(self, 'mini_frame'):
             return
         self.mini_frame.place_forget()
-        self.mini_selected.clear()
+    
+    def set_label(self, species_set: set):
+        """从外部设置标签（如重新加载组时恢复）"""
+        self.mini_selected = set(species_set)
         self.mini_multi_on = False
+        self.mini_multi_btn.config(text="📋 多类别", bg='#6A1B9A')
+        self._update_mini_buttons()
+        if self.mini_selected:
+            self.show_mini_ops()
+        self._notify_label()
     
     def rebuild_mini_buttons(self, species_list: list):
-        """重建迷你按钮（物种列表变化时）"""
+        """重建迷你物种按钮（物种列表变化时），保留已有标签"""
+        # 记住已有标签
+        old_label = set(self.mini_selected)
         for btn in self.mini_buttons.values():
             btn.destroy()
         self.mini_buttons.clear()
-        icons = ["🐾","🦌","🐗","🐻","🐺","🦊","🐵","🐮","🐴","🐑","🐰","🦃","🦅","🦉","🐍","🦎","🐢","🦔","🐿","🦡"]
-        for i, name in enumerate(species_list[:12]):
-            icon = icons[i % len(icons)]
+        for i, name in enumerate(species_list[:8]):
             btn = tk.Button(
-                self.mini_frame,
-                text=f"{icon}{name[:2]}",
+                self.mini_species_row,
+                text=name,
                 font=("微软雅黑", 8),
                 bg=COLOR_BUTTON_SPECIES, fg='white',
                 activebackground='#43A047',
                 relief=tk.FLAT, cursor='hand2',
-                padx=4, pady=1,
+                padx=3, pady=0,
                 command=lambda n=name: self._on_mini_species(n)
             )
-            btn.pack(side=tk.LEFT, padx=1)
+            btn.pack(side=tk.LEFT, padx=1, pady=1)
             self.mini_buttons[name] = btn
+        # 恢复标签（只保留仍存在的物种）
+        self.mini_selected = old_label & set(species_list)
+        self._update_mini_buttons()
+        self._notify_label()
 
 
 # ==================== 全分辨率查看器 ====================
+
+class PathSelectDialog:
+    """
+    启动路径选择对话框：在一个窗口内同时选择输入文件夹和输出文件夹。
+    
+    布局：
+        ┌──────────────────────────────────────────┐
+        │     请选择照片输入和分类输出路径            │
+        │  照片输入路径 [输入框.........] [📁按钮]   │
+        │  照片输出路径 [输入框.........] [📁按钮]   │
+        │              [确定]  [取消]               │
+        └──────────────────────────────────────────┘
+    输入框支持手打路径，也可以点文件夹按钮浏览选择。
+    """
+    
+    def __init__(self, parent, initial_input: str = ""):
+        """
+        参数：
+            parent: 父窗口
+            initial_input: 初始预填的输入路径（可选）
+        """
+        self.result = None  # (input_path, output_path) 或 None（取消）
+        
+        self.window = tk.Toplevel(parent)
+        self.window.title("路径选择")
+        self.window.configure(bg='#1E1E1E')
+        self.window.resizable(False, False)
+        self.window.transient(parent)  # 关联父窗口
+        
+        # 模态：阻塞父窗口交互
+        self.window.grab_set()
+        self.window.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        
+        # ---- 标题 ----
+        tk.Label(
+            self.window, text="请选择照片输入和分类输出路径",
+            font=("微软雅黑", 12, "bold"),
+            bg='#1E1E1E', fg='#E0E0E0'
+        ).pack(pady=(15, 10))
+        
+        # ---- 输入路径行 ----
+        input_row = tk.Frame(self.window, bg='#1E1E1E')
+        input_row.pack(fill=tk.X, padx=20, pady=5)
+        tk.Label(input_row, text="照片输入路径", font=("微软雅黑", 10),
+                 bg='#1E1E1E', fg='#E0E0E0', width=10, anchor='w'
+                 ).pack(side=tk.LEFT)
+        self.entry_input = tk.Entry(input_row, font=("微软雅黑", 10), width=38)
+        self.entry_input.pack(side=tk.LEFT, padx=5, ipady=3)
+        if initial_input:
+            self.entry_input.insert(0, initial_input)
+        tk.Button(input_row, text="📁", font=("微软雅黑", 10),
+                  bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
+                  command=lambda: self._browse(self.entry_input)
+                  ).pack(side=tk.LEFT, padx=2)
+        
+        # ---- 输出路径行 ----
+        output_row = tk.Frame(self.window, bg='#1E1E1E')
+        output_row.pack(fill=tk.X, padx=20, pady=5)
+        tk.Label(output_row, text="照片输出路径", font=("微软雅黑", 10),
+                 bg='#1E1E1E', fg='#E0E0E0', width=10, anchor='w'
+                 ).pack(side=tk.LEFT)
+        self.entry_output = tk.Entry(output_row, font=("微软雅黑", 10), width=38)
+        self.entry_output.pack(side=tk.LEFT, padx=5, ipady=3)
+        tk.Button(output_row, text="📁", font=("微软雅黑", 10),
+                  bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
+                  command=lambda: self._browse(self.entry_output)
+                  ).pack(side=tk.LEFT, padx=2)
+        
+        # ---- 提示文字 ----
+        tk.Label(
+            self.window, text="提示：输出文件夹不存在时会自动创建",
+            font=("微软雅黑", 8), bg='#1E1E1E', fg='#888888'
+        ).pack(pady=(2, 8))
+        
+        # ---- 按钮行 ----
+        btn_row = tk.Frame(self.window, bg='#1E1E1E')
+        btn_row.pack(pady=(5, 15))
+        tk.Button(btn_row, text="确定", font=("微软雅黑", 10),
+                  bg='#2E7D32', fg='white', relief=tk.FLAT, cursor='hand2',
+                  padx=20, pady=4, command=self._on_ok
+                  ).pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_row, text="取消", font=("微软雅黑", 10),
+                  bg='#555555', fg='white', relief=tk.FLAT, cursor='hand2',
+                  padx=20, pady=4, command=self._on_cancel
+                  ).pack(side=tk.LEFT, padx=10)
+        
+        # 回车=确定，ESC=取消
+        self.window.bind('<Return>', lambda e: self._on_ok())
+        self.window.bind('<Escape>', lambda e: self._on_cancel())
+        
+        # 居中显示
+        self.window.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.window.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.window.winfo_height()) // 3
+        self.window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    
+    def _browse(self, entry: tk.Entry):
+        """浏览按钮：弹出文件夹选择并填入输入框"""
+        initial = entry.get().strip() or os.path.expanduser("~")
+        folder = filedialog.askdirectory(
+            title="选择文件夹",
+            initialdir=initial if os.path.isdir(initial) else os.path.expanduser("~")
+        )
+        if folder:
+            entry.delete(0, tk.END)
+            entry.insert(0, folder)
+    
+    def _on_ok(self):
+        """确定按钮：校验路径并返回结果"""
+        in_path = self.entry_input.get().strip().strip('"')
+        out_path = self.entry_output.get().strip().strip('"')
+        
+        # 输入路径必须存在
+        if not in_path:
+            messagebox.showwarning("路径错误", "请输入照片输入路径", parent=self.window)
+            return
+        if not os.path.isdir(in_path):
+            messagebox.showwarning(
+                "路径错误",
+                f"输入文件夹不存在：\n{in_path}",
+                parent=self.window
+            )
+            return
+        
+        # 输出路径：不存在则自动创建
+        if not out_path:
+            messagebox.showwarning("路径错误", "请输入照片输出路径", parent=self.window)
+            return
+        try:
+            os.makedirs(out_path, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror(
+                "路径错误",
+                f"无法创建输出文件夹：\n{out_path}\n\n{e}",
+                parent=self.window
+            )
+            return
+        
+        self.result = (in_path, out_path)
+        self.window.destroy()
+    
+    def _on_cancel(self):
+        """取消按钮"""
+        self.result = None
+        self.window.destroy()
+
 
 class FullScreenViewer:
     """
@@ -693,7 +914,7 @@ class FullScreenViewer:
         self.label_zoom.pack(side=tk.LEFT, padx=15, pady=6)
         
         # 返回按钮（右上角）
-        btn_close = tk.Button(toolbar, text="✕ 返回 [ESC]", font=("微软雅黑", 9),
+        btn_close = tk.Button(toolbar, text="✕ 返回", font=("微软雅黑", 9),
                               bg='#555555', fg='white', relief=tk.FLAT, cursor='hand2',
                               command=self._close, padx=10, pady=2)
         btn_close.pack(side=tk.RIGHT, padx=8, pady=4)
@@ -1036,10 +1257,12 @@ class WildCamSorter:
         
         # ===== 初始化数据 =====
         if source_dir and os.path.isdir(source_dir):
-            self._init_from_source(source_dir)
+            # 命令行传了路径：预填输入框，仍弹对话框选择输出
+            self._pending_input = source_dir
         else:
-            # 启动后提示打开文件夹
-            self.root.after(200, self._prompt_open_folder)
+            self._pending_input = ""
+        # 启动即弹出输入/输出路径选择对话框
+        self.root.after(200, self._show_path_dialog)
     
     # ==================== UI：顶部工具栏 ====================
     
@@ -1114,9 +1337,10 @@ class WildCamSorter:
         
         for row, col, idx, title in panel_configs:
             panel = MediaPanel(self.display_frame, idx, title)
-            panel.frame.grid(row=row, column=col, sticky='nsew', padx=2, pady=2)
+            panel.frame.grid(row=row, column=col, sticky='nsew', padx=1, pady=1)
             panel.set_toggle_callback(self._toggle_file_selection)
             panel.set_fullscreen_callback(self._open_fullscreen)
+            panel.set_refresh_callback(self._on_panel_refresh)
             # 初始化迷你操作区（但隐藏）
             panel.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
             self._panels.append(panel)
@@ -1150,7 +1374,7 @@ class WildCamSorter:
         
         # 空拍按钮
         self.btn_empty = tk.Button(
-            left_frame, text="🟦  空拍 [A]", font=("微软雅黑", 11, "bold"),
+            left_frame, text="🟦  空拍", font=("微软雅黑", 11, "bold"),
             bg=COLOR_BUTTON_EMPTY, fg='white', activebackground='#78909C',
             relief=tk.FLAT, cursor='hand2', padx=14, pady=8,
             command=self._on_empty
@@ -1174,7 +1398,7 @@ class WildCamSorter:
         
         # 新物种按钮
         self.btn_new = tk.Button(
-            left_frame, text="🟧  新物种 [D]", font=("微软雅黑", 11, "bold"),
+            left_frame, text="🟧  新物种", font=("微软雅黑", 11, "bold"),
             bg=COLOR_BUTTON_NEW, fg='white', activebackground='#FF8A00',
             relief=tk.FLAT, cursor='hand2', padx=14, pady=8,
             command=self._on_new_species
@@ -1194,7 +1418,7 @@ class WildCamSorter:
         
         # 上一组
         self.btn_prev = tk.Button(
-            right_frame, text="◀ 上一组 [←]", font=("微软雅黑", 10),
+            right_frame, text="◀ 上一组", font=("微软雅黑", 10),
             bg=COLOR_BUTTON_NAV, fg='white', activebackground='#616161',
             relief=tk.FLAT, cursor='hand2', padx=10, pady=6,
             command=self._prev_group
@@ -1203,7 +1427,7 @@ class WildCamSorter:
         
         # 下一组
         self.btn_next = tk.Button(
-            right_frame, text="下一组 [→] ▶", font=("微软雅黑", 10),
+            right_frame, text="下一组 ▶", font=("微软雅黑", 10),
             bg=COLOR_BUTTON_NAV, fg='white', activebackground='#616161',
             relief=tk.FLAT, cursor='hand2', padx=10, pady=6,
             command=self._next_group
@@ -1261,67 +1485,21 @@ class WildCamSorter:
     # ==================== 键盘绑定 ====================
     
     def _bind_keys(self):
-        """绑定全局键盘快捷键（使用 bind_all 确保在任何焦点下都能响应）"""
-        # 数字键1-4：切换选中
-        for key_char in KEY_TOGGLE_FILES:
-            self.root.bind_all(f'<KeyPress-{key_char}>', self._on_key_toggle)
-        # 注意：bind_all 的优先级低于各 widget 自己的绑定，但高于 bind
-        # 我们使用 bind_all 确保键盘快捷键始终有效
-        
-        # 字母键
-        self.root.bind_all(f'<KeyPress-{KEY_EMPTY}>', lambda e: self._on_empty())
-        self.root.bind_all(f'<KeyPress-{KEY_EMPTY.upper()}>', lambda e: self._on_empty())
-        self.root.bind_all(f'<KeyPress-{KEY_NEW_SPECIES}>', lambda e: self._on_new_species())
-        self.root.bind_all(f'<KeyPress-{KEY_NEW_SPECIES.upper()}>', lambda e: self._on_new_species())
-        
-        # 动态物种键
-        for key_char in KEY_SPECIES_KEYS:
-            if key_char != 'semicolon':
-                self.root.bind_all(f'<KeyPress-{key_char}>', self._on_key_species)
-                self.root.bind_all(f'<KeyPress-{key_char.upper()}>', self._on_key_species)
-            else:
-                self.root.bind_all(f'<KeyPress-;>', self._on_key_species)
-        
-        # 导航键
-        self.root.bind_all('<Left>', lambda e: self._prev_group())
-        self.root.bind_all('<Right>', lambda e: self._next_group())
-        
-        # 空格：播放/暂停
-        self.root.bind_all('<space>', lambda e: self._toggle_play_pause())
-    
-    def _on_key_toggle(self, event):
-        """处理数字键1-4（切换选中状态）"""
-        key_char = event.char
-        if key_char in KEY_TOGGLE_FILES:
-            idx = KEY_TOGGLE_FILES.index(key_char)
-            self._toggle_file_selection(idx)
-    
-    def _on_key_species(self, event):
-        """处理动态物种快捷键（F/G/H/J/K/L/;）"""
-        key_char = event.char.lower() if event.char else ''
-        if not key_char and event.keysym.lower() == 'semicolon':
-            key_char = 'semicolon'
-        
-        species_names = list(self.species_buttons.keys())
-        for i, name in enumerate(species_names):
-            if i < len(KEY_SPECIES_KEYS) and KEY_SPECIES_KEYS[i] == key_char:
-                self._on_species_click(name)
-                return
+        """键盘快捷键已全部移除，所有操作由鼠标点击完成"""
+        pass
     
     # ==================== 数据初始化 ====================
     
     def _init_from_source(self, source_dir: str):
-        """从源文件夹初始化数据"""
+        """从输入文件夹初始化数据（只扫描分组，不依赖输出目录）"""
         self.source_dir = os.path.abspath(source_dir)
         self.parent_dir = os.path.dirname(self.source_dir)
-        if self.target_dir is None:
-            self.target_dir = self.parent_dir
+        # 注意：不默认设置 target_dir，输出目录必须由用户选择
         
         self._log(f"打开文件夹: {self.source_dir}")
-        self._log(f"输出目录: {self.target_dir}")
         
         self.label_folder.config(text=f"📁 {self.source_dir}")
-        self.label_target.config(text=f"📤 输出到: {self.target_dir}")
+        self.label_target.config(text=f"📤 输出到: (未选择)")
         
         # 扫描文件分组
         self.groups = scan_and_group_files(self.source_dir)
@@ -1339,13 +1517,19 @@ class WildCamSorter:
         total_files = sum(len(g) for g in self.groups)
         self.label_stats.config(text=f"共 {len(self.groups)} 组 / {total_files} 个文件")
         
-        # 扫描已有物种文件夹
+        # 输出目录尚未确定，等用户选择后由 _finalize_setup 完成剩余初始化
+        self.current_group_index = -1
+        self._panels_ready = False
+    
+    def _finalize_setup(self):
+        """输出目录确定后执行完整初始化（物种扫描、进度、预分检测、加载首组）"""
+        # 扫描已有物种文件夹（只来自输出目录）
         self._scan_species_folders()
         
         # 加载进度记录
         self._load_progress()
         
-        # ---- 检测已手动分好的照片（从目标文件夹中识别）----
+        # ---- 检测已手动分好的照片（从输出文件夹中识别）----
         self._detect_presorted_files()
         
         # 找到第一个未处理的组
@@ -1358,11 +1542,31 @@ class WildCamSorter:
                 break
             skipped_count += 1
         
-        self.current_group_index = -1
-        self._panels_ready = False
-        
         # 延迟加载首组：等待布局完成后渲染
         self.root.after(400, lambda: self._on_panels_ready(first_unprocessed, skipped_count))
+    
+    def _show_path_dialog(self):
+        """
+        弹出路径选择对话框：一个窗口内同时选择输入和输出文件夹。
+        确定后完成初始化，取消则保持空状态（可用工具栏按钮随时开始）。
+        """
+        dlg = PathSelectDialog(self.root, initial_input=self._pending_input)
+        self.root.wait_window(dlg.window)  # 阻塞直到对话框关闭
+        
+        if dlg.result:
+            in_path, out_path = dlg.result
+            self._init_from_source(in_path)
+            self.target_dir = out_path
+            self.label_target.config(text=f"📤 输出到: {self.target_dir}")
+            self._log(f"设置输出目录: {self.target_dir}")
+            # 完成初始化（物种扫描、进度、预分检测、加载首组）
+            self._finalize_setup()
+        else:
+            # 用户取消：保持空状态，提示可用工具栏按钮
+            self.label_status.config(
+                text="未选择路径，可点工具栏「📂 打开文件夹」随时开始",
+                fg='#FFB74D'
+            )
     
     def _on_panels_ready(self, group_index: int, skipped: int = 0):
         """面板渲染完成后加载首组"""
@@ -1377,32 +1581,49 @@ class WildCamSorter:
         self._update_status()
     
     def _prompt_open_folder(self):
-        """弹出文件夹选择对话框"""
+        """弹出输入文件夹选择对话框（切换输入）"""
         initial = self.source_dir if self.source_dir else os.path.expanduser("~")
         folder = filedialog.askdirectory(title="选择包含野外相机数据的文件夹", initialdir=initial)
         if folder:
             self._stop_video()
+            # 清空旧状态
+            self.processed_groups = set()
+            self.class_history = {}
             self._init_from_source(folder)
+            # 保留已选的输出目录（如果有），否则要求选择
+            if self.target_dir:
+                self._finalize_setup()
+            else:
+                self.root.after(200, self._prompt_target_folder)
     
     def _prompt_target_folder(self):
-        """弹出目标文件夹选择对话框（分类结果输出位置）"""
+        """弹出输出文件夹选择对话框（分类结果输出位置）"""
         initial = self.target_dir if self.target_dir else os.path.expanduser("~")
-        folder = filedialog.askdirectory(title="选择分类结果的输出文件夹", initialdir=initial)
+        folder = filedialog.askdirectory(
+            title="选择分类结果的输出文件夹",
+            initialdir=initial
+        )
         if folder:
             self.target_dir = os.path.abspath(folder)
-            self._log(f"更改输出目录: {self.target_dir}")
+            self._log(f"设置输出目录: {self.target_dir}")
             self.label_target.config(text=f"📤 输出到: {self.target_dir}")
-            # 重新扫描已有物种文件夹
-            self._scan_species_folders()
+            # 输出目录确定后完成初始化
+            self._finalize_setup()
     
     def _scan_species_folders(self):
-        """扫描父文件夹中已有的物种文件夹并重建按钮"""
-        if not self.parent_dir:
+        """扫描输出文件夹中已有的物种文件夹并重建按钮（类别只来自输出目录）"""
+        if not self.target_dir:
             return
-        existing = find_existing_species_folders(self.parent_dir, self.source_dir)
+        # 清空旧物种列表，只保留输出目录中实际存在的类别
+        self.species_list = []
+        existing = find_existing_species_folders(self.target_dir, self.source_dir)
         for sp in existing:
-            if sp not in self.species_list:
-                self.species_list.append(sp)
+            self.species_list.append(sp)
+        # 退出多类模式（物种列表变了，旧选择可能失效）
+        if self.multi_mode:
+            self.multi_mode = False
+            self.multi_selected.clear()
+            self.btn_multi.config(text="📋 多类别", bg='#6A1B9A')
         self._rebuild_species_buttons()
     
     # ==================== 进度追踪 ====================
@@ -1589,6 +1810,21 @@ class WildCamSorter:
         self.selected_flags = [True] * len(self.current_group_files)
         self.per_file_species.clear()  # 清除上组的独立选择
         
+        # 重置所有面板的迷你标签（进入新组时清空）
+        for panel in self._panels:
+            if hasattr(panel, 'clear_mini_selection'):
+                panel.clear_mini_selection()
+        for panel in self.overflow_panels:
+            if hasattr(panel, 'clear_mini_selection'):
+                panel.clear_mini_selection()
+        
+        # 重置主操作区多类模式
+        if self.multi_mode:
+            self.multi_mode = False
+            self.multi_selected.clear()
+            self.btn_multi.config(text="📋 多类别", bg='#6A1B9A')
+            self._update_multi_buttons()
+        
         # 检查该组是否已处理过
         rel_path = self._get_group_rel_path(group_index)
         is_processed = rel_path in self.processed_groups
@@ -1606,7 +1842,7 @@ class WildCamSorter:
                 
                 if panel_idx == 0 and is_video_file(filename):
                     panel.file_path = file_path
-                    panel.name_label.config(text=f"🎬 {filename}")
+                    panel.title_label.config(text=f"{panel.label_text} | 🎬 {filename}")
                     self._load_video(file_path, panel)
                 else:
                     panel.display_image(file_path)
@@ -1636,6 +1872,7 @@ class WildCamSorter:
                 op.frame.grid(row=0, column=i, sticky='nsew', padx=2, pady=2)
                 op.set_toggle_callback(self._toggle_file_selection)
                 op.set_fullscreen_callback(self._open_fullscreen)
+                op.set_refresh_callback(self._on_panel_refresh)
                 op.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
                 op.display_image(file_path)
                 op.set_selected(self.selected_flags[file_idx])
@@ -1745,7 +1982,7 @@ class WildCamSorter:
                 image='', text=f"⚠ 无法播放{ext}视频\n(可点击查看截图)",
                 fg='#FFB74D'
             )
-            panel.name_label.config(text=f"❌ {os.path.basename(video_path)}")
+            panel.title_label.config(text=f"{panel.label_text} | ❌ {os.path.basename(video_path)}")
             self.video_playing = False
             try:
                 panel.display_image(video_path)
@@ -1886,18 +2123,17 @@ class WildCamSorter:
     # ==================== 选中状态管理 ====================
     
     def _toggle_file_selection(self, index: int):
-        """切换指定文件（面板）的选中状态"""
+        """切换指定文件（面板）的选中状态：反选后显示迷你标签栏"""
         if index < 0 or index >= len(self.current_group_files):
             return
         
         self.selected_flags[index] = not self.selected_flags[index]
         self._update_all_panel_selections()
         
-        # 联动迷你操作区：取消选中时显示，选中时隐藏
+        # 反选（取消选中）→ 显示该框的迷你标签栏；重新选中 → 隐藏
         if index < 4:
             panel = self._panels[index]
         else:
-            # 溢出面板
             overflow_idx = index - 4
             panel = self.overflow_panels[overflow_idx] if overflow_idx < len(self.overflow_panels) else None
         
@@ -1906,7 +2142,8 @@ class WildCamSorter:
                 panel.show_mini_ops()
             else:
                 panel.hide_mini_ops()
-                # 清除该文件的独立选择
+                # 重新选中时清除该文件的标签
+                panel.clear_mini_selection()
                 if index in self.per_file_species:
                     del self.per_file_species[index]
         
@@ -1958,6 +2195,15 @@ class WildCamSorter:
         elif file_index in self.per_file_species:
             del self.per_file_species[file_index]
     
+    def _on_panel_refresh(self, panel_index: int):
+        """
+        迷你刷新按钮回调：重新扫描输出文件夹的物种并刷新所有迷你按钮。
+        """
+        self._scan_species_folders()
+        self.label_status.config(
+            text="🔄 已刷新物种列表", fg='#4CAF50'
+        )
+    
     # ==================== 分类操作 ====================
     
     def _on_empty(self):
@@ -1991,9 +2237,9 @@ class WildCamSorter:
             if not self.current_group_files:
                 return
             selected_count = len(self.multi_selected)
-            # 对每个选中的物种执行分类
+            # 对每个选中的物种执行分类（不自动跳组，最后统一跳）
             for species in list(self.multi_selected):
-                self._classify_files(target_species=species)
+                self._classify_files(target_species=species, auto_advance=False)
             # 退出多类模式
             self.multi_mode = False
             self.multi_selected.clear()
@@ -2002,6 +2248,8 @@ class WildCamSorter:
             self.label_status.config(
                 text=f"✅ 已分类到 {selected_count} 个类别", fg='#4CAF50'
             )
+            # 分类完成后自动进入下一组
+            self.root.after(300, self._auto_advance)
         else:
             # 进入多类模式
             self.multi_mode = True
@@ -2059,7 +2307,7 @@ class WildCamSorter:
         
         self._classify_files(target_species=species_name)
     
-    def _classify_files(self, target_species: str = None):
+    def _classify_files(self, target_species: str = None, auto_advance: bool = True):
         """
         执行文件复制操作。
         
@@ -2067,10 +2315,11 @@ class WildCamSorter:
             - 如果该组之前已处理，先删除旧的目标文件（撤销），再重新分类
             - target_species=None → 全部文件复制到"空拍"文件夹
             - target_species=物种名 → 选中的→物种文件夹，未选中的→空拍文件夹
+            - auto_advance=True → 分类完成后自动跳下一组（多类模式循环时传False）
         
         所有操作都是复制（shutil.copy2），原始文件保留不动。
         """
-        if not self.current_group_files or not self.parent_dir:
+        if not self.current_group_files or not self.target_dir:
             self.label_status.config(
                 text="⚠ 错误：未加载数据或未设置目标文件夹",
                 fg='#FF6B6B'
@@ -2078,7 +2327,7 @@ class WildCamSorter:
             return
         
         try:
-            self._do_classify(target_species)
+            self._do_classify(target_species, auto_advance)
         except Exception as e:
             self._log(f"分类失败: {e}\n{traceback.format_exc()}", 'error')
             self.label_status.config(
@@ -2088,7 +2337,7 @@ class WildCamSorter:
             import traceback
             traceback.print_exc()
     
-    def _do_classify(self, target_species: str = None):
+    def _do_classify(self, target_species: str = None, auto_advance: bool = True):
         rel_path = self._get_group_rel_path()
         if rel_path and rel_path in self.processed_groups:
             undone = self._undo_group_copies(self.current_group_index)
@@ -2108,33 +2357,49 @@ class WildCamSorter:
         if species_dir:
             os.makedirs(species_dir, exist_ok=True)
         
+        # ---- 磁盘空间预检 ----
+        try:
+            # 计算当前组文件总大小
+            group_size = sum(os.path.getsize(f) for f in self.current_group_files)
+            # 输出文件夹所在磁盘的剩余空间
+            free_space = shutil.disk_usage(self.target_dir).free
+            if free_space < group_size:
+                self._log(f"磁盘空间不足: 需要约{group_size/1024/1024:.1f}MB, 剩余{free_space/1024/1024:.1f}MB", 'warning')
+                messagebox.showwarning(
+                    "⚠ 磁盘空间可能不足",
+                    f"输出文件夹所在磁盘剩余空间约 {free_space/1024/1024:.0f} MB，\n"
+                    f"当前组文件约需 {group_size/1024/1024:.0f} MB。\n\n"
+                    f"建议清理磁盘空间，或点击「📤 输出到」换一个输出位置。"
+                )
+        except OSError:
+            pass  # 预检失败不影响复制（复制时仍会逐文件报错）
+        
         copied_species = 0
         copied_empty = 0
         errors = []
         dest_files_record = []  # 记录所有复制到的目标路径（用于后续撤销）
         
         for i, file_path in enumerate(self.current_group_files):
-            # 确定该文件的目标文件夹列表
+            # 确定该文件的目标文件夹列表（标签优先）
             dest_dirs = []
+            label = self.per_file_species.get(i)  # 迷你栏打上的标签
             is_selected = (i < len(self.selected_flags) and self.selected_flags[i])
             
-            if target_species is None:
-                # 空拍操作：全部→空拍
+            if label:
+                # 有标签 → 按标签去对应文件夹（标签优先于主按钮）
+                for sp in label:
+                    sp_dir = os.path.join(self.target_dir, sp)
+                    os.makedirs(sp_dir, exist_ok=True)
+                    dest_dirs.append(sp_dir)
+            elif target_species is None:
+                # 主按钮是空拍 + 无标签 → 空拍
                 dest_dirs.append(empty_dir)
             elif is_selected:
-                # 选中的文件 → 全局目标物种
+                # 无标签 + 选中 → 跟随主按钮类别
                 dest_dirs.append(species_dir)
             else:
-                # 取消选中的文件 → 使用框内独立选择的物种
-                local_species = self.per_file_species.get(i, set())
-                if local_species:
-                    for sp in local_species:
-                        sp_dir = os.path.join(self.target_dir, sp)
-                        os.makedirs(sp_dir, exist_ok=True)
-                        dest_dirs.append(sp_dir)
-                else:
-                    # 没有独立选择 → 空拍
-                    dest_dirs.append(empty_dir)
+                # 无标签 + 取消选中 → 空拍
+                dest_dirs.append(empty_dir)
             
             filename = os.path.basename(file_path)
             
@@ -2158,7 +2423,10 @@ class WildCamSorter:
                         copied_empty += 1
                         
                 except Exception as e:
-                    errors.append(f"  {filename}: {e}")
+                    # 记录错误详情（区分磁盘满等严重错误）
+                    err_msg = str(e)
+                    errors.append(f"  {filename}: {err_msg}")
+                    self._log(f"复制失败 {filename}: {err_msg}", 'error')
         
         # 标记为已处理（带分类详情）
         self._mark_group_processed(
@@ -2190,6 +2458,27 @@ class WildCamSorter:
             text=" | ".join(parts),
             fg='#4CAF50' if not errors else '#FF9800'
         )
+        
+        # 复制失败时弹窗提醒（磁盘满等严重错误不能只看状态栏）
+        if errors:
+            error_text = "\n".join(errors)
+            # 判断是否磁盘空间不足
+            is_disk_full = any(
+                ('空间' in e or 'No space' in e or 'ENOSPC' in e or '112' in e) for e in errors
+            )
+            if is_disk_full:
+                messagebox.showerror(
+                    "⚠ 输出文件夹空间不足",
+                    f"复制文件失败，输出文件夹所在磁盘空间可能已满！\n\n"
+                    f"请清理磁盘空间，或点击「📤 输出到」换一个输出位置。\n\n"
+                    f"失败详情：\n{error_text}"
+                )
+            else:
+                messagebox.showwarning(
+                    "复制部分文件失败",
+                    f"有 {len(errors)} 个文件复制失败：\n\n{error_text}\n\n"
+                    f"详细原因请查看日志文件 wildcam_sorter.log"
+                )
         # 恢复组信息标签颜色（之前可能被设为黄色警告色）
         self.label_group_info.config(
             text=f"📦 第 {self.current_group_index + 1}/{len(self.groups)} 组",
@@ -2199,8 +2488,9 @@ class WildCamSorter:
         self._update_progress_bar()
         self._update_status()
         
-        # 自动跳转下一组
-        self.root.after(250, self._auto_advance)
+        # 自动跳转下一组（多类模式循环时由外层统一调度）
+        if auto_advance:
+            self.root.after(250, self._auto_advance)
     
     def _auto_advance(self):
         """分类完成后自动跳转到下一组"""
@@ -2282,10 +2572,6 @@ class WildCamSorter:
             lbl.pack(side=tk.LEFT, padx=4)
             return
         
-        # 物种emoji图标池
-        icons = ["🐾", "🦌", "🐗", "🐻", "🐺", "🦊", "🐵", "🐮", "🐴", "🐑",
-                 "🐰", "🦃", "🦅", "🦉", "🐍", "🦎", "🐢", "🦔", "🐿", "🦡"]
-        
         # 自动换行：每行最多7个按钮，超出换到下一行
         MAX_PER_ROW = 7
         # 创建行容器
@@ -2297,12 +2583,9 @@ class WildCamSorter:
                 row_frame.pack(fill=tk.X, pady=1)
                 row_frames.append(row_frame)
             
-            key_label = f" [{KEY_SPECIES_KEYS[i].upper()}]" if i < len(KEY_SPECIES_KEYS) else ""
-            icon = icons[i % len(icons)]
-            
             btn = tk.Button(
                 row_frames[row_idx],
-                text=f"{icon} {name}{key_label}",
+                text=name,
                 font=("微软雅黑", 11),
                 bg=COLOR_BUTTON_SPECIES, fg='white',
                 activebackground='#43A047',
