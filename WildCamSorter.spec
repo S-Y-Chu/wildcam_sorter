@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+# PyInstaller 打包配置（体积优化版）
 
 a = Analysis(
     ['wildcam_sorter.py'],
@@ -9,14 +9,21 @@ a = Analysis(
         (r'F:\software\anaconda\envs\wildcam\Library\bin\tk86t.dll', '.'),
     ],
     datas=[
+        # 只带 tcl8.6（8.4/8.5 用不到，删掉省空间）
         (r'F:\software\anaconda\envs\wildcam\Library\lib\tcl8.6', 'tcl8\\8.6'),
         (r'F:\software\anaconda\envs\wildcam\Library\lib\tk8.6', 'tk8.6'),
     ],
-    hiddenimports=[],
+    hiddenimports=['av'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # 排除用不到的大模块（matplotlib 15MB / imageio_ffmpeg 84MB / imageio）
+    excludes=[
+        'matplotlib', 'imageio', 'imageio_ffmpeg',
+        'tkinter.test', 'tkinter.test.support',
+        'unittest', 'pydoc', 'doctest', 'pickletester',
+        'test', 'distutils', 'ensurepip',
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -30,7 +37,7 @@ exe = EXE(
     name='WildCamSorter',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,
     upx=True,
     console=False,
     disable_windowed_traceback=False,
@@ -43,7 +50,7 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    strip=False,
+    strip=True,
     upx=True,
     upx_exclude=[],
     name='WildCamSorter',

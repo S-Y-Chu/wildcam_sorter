@@ -1919,7 +1919,7 @@ class WildCamSorter:
     def _load_video(self, video_path: str, panel: MediaPanel):
         """
         加载视频文件并开始播放。
-        先尝试opencv（多种后端），失败则用imageio-ffmpeg后备。
+        先尝试opencv（多种后端），失败则用PyAV后备。
         
         参数：
             video_path: 视频文件路径
@@ -1929,8 +1929,8 @@ class WildCamSorter:
         if self.video_cap:
             self.video_cap.release()
             self.video_cap = None
-        self._video_reader = None    # imageio reader（后备方案）
-        self._video_frame_iter = None
+        self._av_container = None    # PyAV 容器（后备方案）
+        self._av_frame_iter = None
         self._video_total_frames = 0
         self._video_frame_idx = 0
         
@@ -1958,24 +1958,29 @@ class WildCamSorter:
             except Exception:
                 pass
         
-        # ---- 方案2: imageio-ffmpeg 后备 ----
+        # ---- 方案2: PyAV 后备（av.open + frame.to_image，轻量且稳定）----
         if not self.video_cap or not self.video_cap.isOpened():
             try:
-                import imageio.v3 as iio
-                self._video_reader = iio.imiter(video_path, plugin='pyav')
-                # 读取第一帧以验证
-                first_frame = next(self._video_reader, None)
-                if first_frame is not None:
-                    # 重建iterator（因为已经消耗了第一帧）
-                    self._video_reader = iio.imiter(video_path, plugin='pyav')
-                    self.video_cap = None  # 使用imageio路径
+                import av
+                self._av_container = av.open(video_path)
+                # 验证存在视频流
+                if not self._av_container.streams.video:
+                    self._av_container.close()
+                    self._av_container = None
                 else:
-                    self._video_reader = None
+                    # 预读第一帧验证可解码
+                    self._av_frame_iter = self._av_container.decode(video=0)
+                    first_frame = next(self._av_frame_iter, None)
+                    if first_frame is None:
+                        self._av_container.close()
+                        self._av_container = None
+                    else:
+                        self.video_cap = None  # 使用PyAV路径
             except Exception:
-                self._video_reader = None
+                self._av_container = None
         
         # ---- 全部失败 ----
-        if (not self.video_cap or not self.video_cap.isOpened()) and self._video_reader is None:
+        if (not self.video_cap or not self.video_cap.isOpened()) and self._av_container is None:
             ext = os.path.splitext(video_path)[1].lower()
             self._log(f"无法播放视频: {video_path}", 'warning')
             panel.media_label.config(
@@ -1996,7 +2001,7 @@ class WildCamSorter:
             if fps <= 0 or fps > 120:
                 fps = 25
         else:
-            fps = 25  # imageio默认
+            fps = 25  # PyAV默认
         
         target_fps = min(fps, 20)
         self.video_frame_delay = max(25, int(1000 / target_fps))
@@ -2008,7 +2013,7 @@ class WildCamSorter:
     
     def _update_video_frame(self):
         """
-        定时更新视频帧（支持opencv和imageio双源）。
+        定时更新视频帧（支持opencv和PyAV双源）。
         视频播放完毕后自动循环。
         """
         if not self.video_playing:
@@ -2033,22 +2038,25 @@ class WildCamSorter:
                     self.video_playing = False
                     return
         
-        # ---- 源2: imageio-ffmpeg（后备）----
-        elif self._video_reader is not None:
+        # ---- 源2: PyAV（后备）----
+        elif self._av_container is not None:
             try:
-                frame = next(self._video_reader, None)
+                frame = next(self._av_frame_iter, None)
                 if frame is None:
-                    # 循环：重建reader
-                    import imageio.v3 as iio
-                    self._video_reader = iio.imiter(self.video_panel.file_path, plugin='pyav')
-                    frame = next(self._video_reader, None)
+                    # 循环：seek到开头重新解码
+                    self._av_container.seek(0)
+                    self._av_frame_iter = self._av_container.decode(video=0)
+                    frame = next(self._av_frame_iter, None)
             except StopIteration:
-                import imageio.v3 as iio
-                self._video_reader = iio.imiter(self.video_panel.file_path, plugin='pyav')
-                frame = next(self._video_reader, None)
+                self._av_container.seek(0)
+                self._av_frame_iter = self._av_container.decode(video=0)
+                frame = next(self._av_frame_iter, None)
             except Exception:
                 self.video_playing = False
                 return
+            if frame is not None:
+                # VideoFrame → PIL Image（RGB）
+                frame = frame.to_image()
         
         else:
             self.video_playing = False
@@ -2078,16 +2086,15 @@ class WildCamSorter:
             new_w, new_h = panel._calc_display_size()
             self._cached_video_dims = (new_w, new_h)
         
-        # --- 渲染帧（opencv BGR 或 imageio RGB）---
+        # --- 渲染帧（opencv BGR 或 PyAV RGB）---
         if new_w > 0 and new_h > 0:
             if self.video_cap and self.video_cap.isOpened():
                 # OpenCV: BGR → resize → RGB
                 frame_small = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                 frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
             else:
-                # imageio: RGB → resize（PIL更可靠）
-                pil_frame = Image.fromarray(frame)
-                frame_rgb = np.array(pil_frame.resize((new_w, new_h), Image.LANCZOS))
+                # PyAV: 已经是PIL Image（RGB），直接缩放
+                frame_rgb = np.array(frame.resize((new_w, new_h), Image.LANCZOS))
             pil_img = Image.fromarray(frame_rgb)
             self.video_photo = ImageTk.PhotoImage(pil_img)
             panel.media_label.config(image=self.video_photo, text='')
@@ -2116,7 +2123,13 @@ class WildCamSorter:
         if self.video_cap:
             self.video_cap.release()
             self.video_cap = None
-        self._video_reader = None
+        if self._av_container is not None:
+            try:
+                self._av_container.close()
+            except Exception:
+                pass
+            self._av_container = None
+        self._av_frame_iter = None
         self.video_photo = None
         self.video_panel = None
     
