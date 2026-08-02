@@ -282,3 +282,23 @@ A: 删了会丢失断点续传记录（所有组恢复"未处理"状态），已
 - Pillow（图像处理 + EXIF读取）
 - PyInstaller（打包为独立exe）
 - 仅支持 Windows 10/11 64位
+
+---
+
+## © 版权与致谢
+
+```
+╔══════════════════════════════════════════════════════════╗
+║                                                          ║
+║   WildCam Sorter — 野外相机数据分类工具                    ║
+║                                                          ║
+║   Vibe Coding work                                        ║
+║   Made by Siyuan ZHU, 2026                                ║
+║                                                          ║
+║   Supported by Deepseek v4-pro-preview                    ║
+║   and Deepseek v4 flash-0731                              ║
+║                                                          ║
+║   © 2026 Siyuan ZHU. All rights reserved.                ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝
+```
