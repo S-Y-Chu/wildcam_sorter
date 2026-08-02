@@ -983,7 +983,7 @@ class FullScreenViewer:
         self.canvas.bind('<Button-5>', self._on_mousewheel_down)  # Linux滚轮下
         self.canvas.bind('<ButtonPress-1>', self._on_drag_start)
         self.canvas.bind('<B1-Motion>', self._on_drag_move)
-        self.window.bind('<space>', lambda e: self._toggle_video() if is_video else None)
+        # 键盘快捷键已全部移除（纯鼠标操作）：播放/暂停用底部按钮
         
         # ---- 加载媒体 ----
         if is_video:
