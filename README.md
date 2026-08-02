@@ -21,9 +21,12 @@
 ```bash
 conda activate wildcam
 python wildcam_sorter.py
-# 或直接指定文件夹
+# 或指定输入文件夹（启动时预填输入框，仍会弹出对话框选择输出）
 python wildcam_sorter.py "D:\DCIM\100_L59"
 ```
+
+> 无论是否传路径，启动后都会弹出**输入/输出路径选择对话框**。
+> 命令行传的路径只是自动填入"照片输入路径"一栏，输出路径仍需手动选择。
 
 ---
 
