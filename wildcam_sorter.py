@@ -2164,7 +2164,7 @@ class WildCamSorter:
             self.root.after_cancel(self.video_after_id)
             self.video_after_id = None
         # 通知解码线程退出并等待（超时2秒，避免阻塞UI）
-        if hasattr(self, '_video_stop'):
+        if self._video_stop is not None:
             self._video_stop.set()
         if hasattr(self, '_video_thread') and self._video_thread is not None:
             self._video_thread.join(timeout=2)
