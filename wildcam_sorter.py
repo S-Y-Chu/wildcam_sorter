@@ -45,6 +45,7 @@ import shutil
 import logging
 import queue
 import threading
+import time
 import traceback
 from pathlib import Path
 from datetime import datetime
@@ -88,6 +89,9 @@ COLOR_BUTTON_NEW = '#E65100'         # 深橙色 - 新物种按钮
 COLOR_BUTTON_NAV = '#424242'         # 灰色 - 导航按钮
 COLOR_PROGRESS = '#1565C0'           # 蓝色 - 进度条
 COLOR_TOOLBAR = '#111111'
+
+# CSV固定列。文件名放在第一列，图片和视频统一按“一个文件一行”记录。
+CSV_HEADERS = ['文件名', '经度', '纬度', '海拔高度(m)', '物种名', '拍摄时间', '点位名称']
 
 
 # ==================== 辅助函数 ====================
@@ -873,6 +877,7 @@ class FullScreenViewer:
     MIN_SCALE = 0.1   # 最小缩放10%
     MAX_SCALE = 5.0   # 最大缩放500%
     SCALE_STEP = 0.1  # 滚轮每次变化10%
+    PLAYBACK_RATES = (0.5, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5, 2.0)
     
     def __init__(self, parent, file_path: str, is_video: bool = False):
         """
@@ -889,8 +894,16 @@ class FullScreenViewer:
         self._video_cap = None        # cv2.VideoCapture（视频用）
         self._video_playing = False   # 视频播放状态
         self._video_after_id = None   # after ID
+        self._video_fps = 25.0        # 视频原始帧率
+        self._video_frame_count = 0   # 视频总帧数
+        self._video_duration = 0.0    # 视频时长（秒）
+        self._playback_rate = 1.0     # 播放倍速
+        self._next_frame_deadline = None  # 下一帧对应的单调时钟时间
+        self._seeking = False         # 用户是否正在拖动进度条
+        self._updating_progress = False
         self._drag_start = None       # 拖动起始坐标
         self._canvas_img_id = None    # Canvas中图片的ID
+        self._canvas_resize_after_id = None
         
         # 创建顶层窗口
         self.window = tk.Toplevel(parent)
@@ -944,7 +957,7 @@ class FullScreenViewer:
         self.v_scroll.config(command=self.canvas.yview)
         
         # ---- 底部控制栏 ----
-        bottom_bar = tk.Frame(self.window, bg='#1A1A1A', height=40)
+        bottom_bar = tk.Frame(self.window, bg='#1A1A1A', height=46)
         bottom_bar.pack(fill=tk.X, side=tk.BOTTOM)
         bottom_bar.pack_propagate(False)
         
@@ -972,12 +985,41 @@ class FullScreenViewer:
                             command=lambda: self._set_scale(1.0), padx=8, pady=3)
         btn_100.pack(side=tk.LEFT, padx=2, pady=4)
         
-        # 播放/暂停按钮（仅视频）
+        # 播放控制（仅视频）
         if is_video:
             self.btn_play = tk.Button(bottom_bar, text="⏯ 暂停", font=("微软雅黑", 10),
                                       bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                                       command=self._toggle_video, padx=10, pady=3)
-            self.btn_play.pack(side=tk.RIGHT, padx=8, pady=4)
+            self.btn_play.pack(side=tk.LEFT, padx=(14, 4), pady=4)
+
+            self.video_time_label = tk.Label(
+                bottom_bar, text="00:00 / 00:00", font=("微软雅黑", 9),
+                bg='#1A1A1A', fg='#CCCCCC', width=15
+            )
+            self.video_time_label.pack(side=tk.RIGHT, padx=(4, 8), pady=4)
+
+            self.speed_var = tk.StringVar(value="1.0×")
+            self.speed_combo = ttk.Combobox(
+                bottom_bar,
+                textvariable=self.speed_var,
+                values=[f"{rate:g}×" for rate in self.PLAYBACK_RATES],
+                state='readonly', width=6, font=("微软雅黑", 9)
+            )
+            self.speed_combo.pack(side=tk.RIGHT, padx=4, pady=5)
+            self.speed_combo.bind('<<ComboboxSelected>>', self._on_speed_changed)
+
+            tk.Label(bottom_bar, text="倍速", font=("微软雅黑", 9),
+                     bg='#1A1A1A', fg='#CCCCCC').pack(side=tk.RIGHT, pady=4)
+
+            self.video_progress_var = tk.DoubleVar(value=0.0)
+            self.video_progress = ttk.Scale(
+                bottom_bar, from_=0.0, to=1.0,
+                variable=self.video_progress_var,
+                command=self._on_seek_preview
+            )
+            self.video_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 4), pady=9)
+            self.video_progress.bind('<ButtonPress-1>', self._on_seek_start)
+            self.video_progress.bind('<ButtonRelease-1>', self._on_seek_end)
         
         # ---- 绑定事件 ----
         self.canvas.bind('<MouseWheel>', self._on_mousewheel)     # Windows滚轮
@@ -985,15 +1027,17 @@ class FullScreenViewer:
         self.canvas.bind('<Button-5>', self._on_mousewheel_down)  # Linux滚轮下
         self.canvas.bind('<ButtonPress-1>', self._on_drag_start)
         self.canvas.bind('<B1-Motion>', self._on_drag_move)
-        # 键盘快捷键已全部移除（纯鼠标操作）：播放/暂停用底部按钮
+        self.canvas.bind('<Configure>', self._on_canvas_configure)
+        if is_video:
+            self.window.bind('<space>', self._on_space_play_pause)
         
         # ---- 加载媒体 ----
         if is_video:
             self._load_video()
         else:
             self._load_image()
-        # 默认50%显示（标准大小），用户可滚轮缩放调整
-        self._set_scale(0.5)
+        # 始终以1:1（100%）打开；after_idle确保Canvas完成布局后再居中。
+        self.window.after_idle(lambda: self._set_scale(1.0))
     
     # ==================== 图片加载 ====================
     
@@ -1009,48 +1053,183 @@ class FullScreenViewer:
     # ==================== 视频播放 ====================
     
     def _load_video(self):
-        """加载并开始播放视频（全分辨率）"""
+        """加载视频，读取真实帧率/时长，并以1.0倍速开始播放。"""
         self._video_cap = cv2.VideoCapture(self.file_path)
         if not self._video_cap.isOpened():
             self.canvas.create_text(700, 400, text="无法打开视频",
                                     fill='#FF6B6B', font=("微软雅黑", 14))
+            if hasattr(self, 'btn_play'):
+                self.btn_play.config(state=tk.DISABLED)
             return
         
         fps = self._video_cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0 or fps > 120:
-            fps = 25
-        self._video_fps = fps
-        self._video_frame_delay = max(25, int(1000 / min(fps, 25)))
+            fps = 25.0
+        self._video_fps = float(fps)
+        self._video_frame_count = max(0, int(self._video_cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        self._video_duration = (
+            self._video_frame_count / self._video_fps
+            if self._video_frame_count > 0 else 0.0
+        )
+        self._playback_rate = 1.0
+        if hasattr(self, 'speed_var'):
+            self.speed_var.set("1.0×")
+        if hasattr(self, 'video_progress'):
+            self.video_progress.config(to=max(self._video_duration, 0.001))
         
-        # 先读取第一帧作为初始显示（让_set_scale能立即生效）
+        # 先显示第一帧，再按媒体时钟调度后续帧。
         ret, frame = self._video_cap.read()
         if ret:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            self._orig_image = Image.fromarray(frame_rgb)
-            self._update_display()
+            self._display_video_frame(frame)
+            self._set_video_progress(self._get_video_position())
         
         self._video_playing = True
-        self._update_video_frame()
+        self._schedule_next_video_frame(reset_clock=True)
+
+    def _frame_interval(self) -> float:
+        """返回当前倍速下相邻视频帧的墙钟时间间隔（秒）。"""
+        return 1.0 / max(self._video_fps * self._playback_rate, 0.001)
+
+    def _schedule_next_video_frame(self, reset_clock: bool = False):
+        """按照媒体时钟调度下一帧，避免把解码/缩放耗时叠加到帧间隔。"""
+        if not self._video_playing or self._video_cap is None or self._seeking:
+            return
+        if self._video_after_id:
+            try:
+                self.window.after_cancel(self._video_after_id)
+            except tk.TclError:
+                pass
+            self._video_after_id = None
+
+        now = time.monotonic()
+        interval = self._frame_interval()
+        if reset_clock or self._next_frame_deadline is None:
+            self._next_frame_deadline = now + interval
+        delay_ms = max(1, int((self._next_frame_deadline - now) * 1000))
+        self._video_after_id = self.window.after(delay_ms, self._update_video_frame)
     
     def _update_video_frame(self):
-        """更新视频帧（全分辨率，按scale缩放）"""
-        if not self._video_playing or self._video_cap is None:
+        """按真实FPS和当前倍速更新视频；落后时跳帧以保持正常播放速度。"""
+        self._video_after_id = None
+        if not self._video_playing or self._video_cap is None or self._seeking:
             return
-        
+
+        interval = self._frame_interval()
+        now = time.monotonic()
+        if self._next_frame_deadline is None:
+            self._next_frame_deadline = now
+
+        # 若UI渲染落后于媒体时钟，跳过已经错过的帧，而不是让整段视频慢放。
+        frames_behind = max(0, int((now - self._next_frame_deadline) / interval))
+        for _ in range(min(frames_behind, 30)):
+            if not self._video_cap.grab():
+                break
+
         ret, frame = self._video_cap.read()
         if not ret:
             self._video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self._video_cap.read()
             if not ret:
                 self._video_playing = False
+                if hasattr(self, 'btn_play'):
+                    self.btn_play.config(text="▶ 播放")
                 return
-        
-        # 原始帧 BGR → RGB → PIL Image
+
+        self._display_video_frame(frame)
+        self._set_video_progress(self._get_video_position())
+
+        # deadline只按媒体帧时钟推进，渲染耗时不会额外拖慢播放。
+        self._next_frame_deadline += interval * (min(frames_behind, 30) + 1)
+        if self._next_frame_deadline < time.monotonic() - interval:
+            self._next_frame_deadline = time.monotonic() + interval
+        self._schedule_next_video_frame()
+
+    def _display_video_frame(self, frame):
+        """把OpenCV帧转换成PIL图像并刷新Canvas。"""
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         self._orig_image = Image.fromarray(frame_rgb)
         self._update_display()
-        
-        self._video_after_id = self.window.after(self._video_frame_delay, self._update_video_frame)
+
+    def _get_video_position(self) -> float:
+        """返回当前播放位置（秒），兼容不提供POS_MSEC的解码器。"""
+        if self._video_cap is None:
+            return 0.0
+        position_ms = self._video_cap.get(cv2.CAP_PROP_POS_MSEC)
+        if position_ms and position_ms > 0:
+            return min(position_ms / 1000.0, self._video_duration or position_ms / 1000.0)
+        frame_index = self._video_cap.get(cv2.CAP_PROP_POS_FRAMES)
+        return max(0.0, frame_index / max(self._video_fps, 0.001))
+
+    @staticmethod
+    def _format_video_time(seconds: float) -> str:
+        """把秒数格式化为 mm:ss；超过一小时后显示 h:mm:ss。"""
+        total = max(0, int(seconds))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _set_video_progress(self, seconds: float):
+        """由播放器更新进度条和时间文本，不触发用户拖动逻辑。"""
+        if not hasattr(self, 'video_progress_var'):
+            return
+        self._updating_progress = True
+        try:
+            position = max(0.0, min(float(seconds), self._video_duration or float(seconds)))
+            self.video_progress_var.set(position)
+            self.video_time_label.config(
+                text=f"{self._format_video_time(position)} / "
+                     f"{self._format_video_time(self._video_duration)}"
+            )
+        finally:
+            self._updating_progress = False
+
+    def _on_seek_preview(self, value):
+        """拖动进度条时即时更新时间显示。"""
+        if self._updating_progress or not hasattr(self, 'video_time_label'):
+            return
+        seconds = float(value)
+        self.video_time_label.config(
+            text=f"{self._format_video_time(seconds)} / "
+                 f"{self._format_video_time(self._video_duration)}"
+        )
+
+    def _on_seek_start(self, event=None):
+        """开始拖动进度条；暂时停止帧调度。"""
+        self._seeking = True
+        if self._video_after_id:
+            try:
+                self.window.after_cancel(self._video_after_id)
+            except tk.TclError:
+                pass
+            self._video_after_id = None
+
+    def _on_seek_end(self, event=None):
+        """跳转到进度条位置并继续此前的播放状态。"""
+        if self._video_cap is None:
+            self._seeking = False
+            return
+        target_seconds = max(0.0, min(self.video_progress_var.get(), self._video_duration))
+        self._video_cap.set(cv2.CAP_PROP_POS_MSEC, target_seconds * 1000.0)
+        ret, frame = self._video_cap.read()
+        if ret:
+            self._display_video_frame(frame)
+            self._set_video_progress(self._get_video_position())
+        self._seeking = False
+        self._next_frame_deadline = None
+        if self._video_playing:
+            self._schedule_next_video_frame(reset_clock=True)
+
+    def _on_speed_changed(self, event=None):
+        """应用用户选择的播放倍速。"""
+        try:
+            self._playback_rate = float(self.speed_var.get().rstrip('×'))
+        except (TypeError, ValueError):
+            self._playback_rate = 1.0
+            self.speed_var.set("1.0×")
+        if self._video_playing:
+            self._schedule_next_video_frame(reset_clock=True)
     
     def _toggle_video(self):
         """播放/暂停视频"""
@@ -1060,13 +1239,18 @@ class FullScreenViewer:
         if self._video_playing:
             if hasattr(self, 'btn_play'):
                 self.btn_play.config(text="⏯ 暂停")
-            self._update_video_frame()
+            self._schedule_next_video_frame(reset_clock=True)
         else:
             if hasattr(self, 'btn_play'):
                 self.btn_play.config(text="▶ 播放")
             if self._video_after_id:
                 self.window.after_cancel(self._video_after_id)
                 self._video_after_id = None
+
+    def _on_space_play_pause(self, event=None):
+        """空格键与播放/暂停按钮保持一致。"""
+        self._toggle_video()
+        return 'break'
     
     # ==================== 显示更新 ====================
     
@@ -1146,6 +1330,19 @@ class FullScreenViewer:
     def _on_mousewheel_down(self, event):
         """Linux滚轮下（缩小）"""
         self._zoom(-self.SCALE_STEP)
+
+    def _on_canvas_configure(self, event=None):
+        """窗口布局变化时保持当前缩放比例，只重新居中显示。"""
+        if self._canvas_resize_after_id:
+            try:
+                self.window.after_cancel(self._canvas_resize_after_id)
+            except tk.TclError:
+                pass
+        self._canvas_resize_after_id = self.window.after(60, self._refresh_after_canvas_resize)
+
+    def _refresh_after_canvas_resize(self):
+        self._canvas_resize_after_id = None
+        self._update_display()
     
     # ==================== 拖动平移 ====================
     
@@ -1170,7 +1367,17 @@ class FullScreenViewer:
         """关闭查看器，释放资源"""
         self._video_playing = False
         if self._video_after_id:
-            self.window.after_cancel(self._video_after_id)
+            try:
+                self.window.after_cancel(self._video_after_id)
+            except tk.TclError:
+                pass
+            self._video_after_id = None
+        if self._canvas_resize_after_id:
+            try:
+                self.window.after_cancel(self._canvas_resize_after_id)
+            except tk.TclError:
+                pass
+            self._canvas_resize_after_id = None
         if self._video_cap:
             self._video_cap.release()
         self.window.destroy()
@@ -2232,8 +2439,9 @@ class WildCamSorter:
         file_path = self.current_group_files[panel_index]
         is_video = (panel_index == 0 and is_video_file(os.path.basename(file_path)))
         
-        # 暂停主窗口视频（避免两个窗口同时播放）
-        if self.video_playing:
+        # 暂停主窗口视频（避免两个窗口同时播放），并记住原来的播放状态。
+        was_playing = self.video_playing
+        if was_playing:
             self._toggle_play_pause()
         
         # 创建并打开全分辨率查看器（模态窗口，阻塞直到关闭）
@@ -2241,8 +2449,8 @@ class WildCamSorter:
         # 等待查看器窗口关闭
         self.root.wait_window(viewer.window)
         
-        # 查看器关闭后恢复主窗口视频
-        if not self.video_playing and is_video:
+        # 只有原本正在播放时才恢复；查看图片也不会把主预览永久暂停。
+        if was_playing and not self.video_playing:
             self._toggle_play_pause()
     
     def _on_panel_species_select(self, file_index: int, selected_species: set):
@@ -2502,7 +2710,7 @@ class WildCamSorter:
             self._log(f"分类错误详情: {errors}", 'warning')
         
         # ---- CSV记录（所有分类均记录：空拍 + 物种）----
-        self._write_csv_record(target_species if target_species else "空拍")
+        self._write_csv_record(target_species)
         
         # 状态栏反馈
         parts = []
@@ -2559,60 +2767,128 @@ class WildCamSorter:
             self.label_status.config(text="🎉 所有数据已处理完毕！", fg='#4CAF50')
             self.label_group_info.config(text="✨ 全部完成！")
     
-    def _write_csv_record(self, species_name: str):
+    def _csv_species_for_file(self, file_index: int, target_species: str = None) -> str:
+        """返回单个文件最终进入的类别；多类别以中文分号合并在同一行。"""
+        labels = self.per_file_species.get(file_index)
+        if labels:
+            return '；'.join(sorted(labels, key=natural_sort_key))
+        if target_species is None:
+            return "空拍"
+        is_selected = (
+            file_index < len(self.selected_flags) and self.selected_flags[file_index]
+        )
+        return target_species if is_selected else "空拍"
+
+    @staticmethod
+    def _merge_media_metadata(own_data: dict, fallback_data: dict) -> dict:
+        """优先使用文件自身元数据，缺失字段才回退到同组可用元数据。"""
+        return {
+            key: own_data.get(key) if own_data.get(key) is not None else fallback_data.get(key)
+            for key in ('longitude', 'latitude', 'altitude', 'datetime')
+        }
+
+    @staticmethod
+    def _csv_row(file_path: str, metadata: dict, species_name: str, point_name: str) -> dict:
+        """构造一个媒体文件对应的CSV行。"""
+        return {
+            '文件名': os.path.basename(file_path),
+            '经度': f"{metadata['longitude']:.6f}" if metadata['longitude'] is not None else "",
+            '纬度': f"{metadata['latitude']:.6f}" if metadata['latitude'] is not None else "",
+            '海拔高度(m)': f"{metadata['altitude']:.1f}" if metadata['altitude'] is not None else "",
+            '物种名': species_name,
+            '拍摄时间': metadata['datetime'].strftime('%Y-%m-%d %H:%M:%S') if metadata['datetime'] else "",
+            '点位名称': point_name,
+        }
+
+    def _write_csv_record(self, target_species: str = None):
         """
-        将非空拍分类记录写入CSV文件。
-        
-        CSV列：经度, 纬度, 海拔高度(m), 物种名, 拍摄时间, 点位名称
-        
-        参数：
-            species_name: 物种名称
+        将当前组逐文件写入CSV：一个图片或视频对应一行。
+
+        重新分类同一组时按“点位名称 + 文件名”更新原行，避免重复记录。
+        旧版无“文件名”列的CSV无法可靠映射到单个文件，因此会先自动备份，
+        再创建新版CSV。
         """
-        if not self.target_dir:
+        if not self.target_dir or not self.current_group_files:
             return
-        
-        # CSV文件路径：保存在目标文件夹下
+
         csv_path = os.path.join(self.target_dir, 'wildcam_records.csv')
-        
-        # ---- 从当前组文件中提取GPS和时间 ----
-        gps_data = {'longitude': None, 'latitude': None, 'altitude': None, 'datetime': None}
-        
-        # 遍历当前组文件，优先从JPG图片中读取EXIF（图片通常有完整GPS数据）
-        for file_path in self.current_group_files:
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext in IMAGE_EXTENSIONS:
-                gps_data = extract_gps_from_file(file_path)
-                if gps_data['latitude'] is not None or gps_data['datetime'] is not None:
-                    break  # 成功读取到有效数据
-        
-        # 如果图片中没有GPS，再尝试视频文件
-        if gps_data['latitude'] is None and gps_data['datetime'] is None:
-            for file_path in self.current_group_files:
-                if is_video_file(os.path.basename(file_path)):
-                    gps_data = extract_gps_from_file(file_path)
-                    if gps_data['latitude'] is not None or gps_data['datetime'] is not None:
-                        break
-        
-        # ---- 准备CSV行数据 ----
-        lon = f"{gps_data['longitude']:.6f}" if gps_data['longitude'] is not None else ""
-        lat = f"{gps_data['latitude']:.6f}" if gps_data['latitude'] is not None else ""
-        alt = f"{gps_data['altitude']:.1f}" if gps_data['altitude'] is not None else ""
-        dt_str = gps_data['datetime'].strftime('%Y-%m-%d %H:%M:%S') if gps_data['datetime'] else ""
         point_name = os.path.basename(self.source_dir) if self.source_dir else ""
-        
-        row = [lon, lat, alt, species_name, dt_str, point_name]
-        
-        # ---- 写入CSV（追加模式）----
+
+        # 为无完整元数据的文件准备同组回退值（仍优先使用文件自身值）。
+        empty_metadata = {
+            'longitude': None, 'latitude': None,
+            'altitude': None, 'datetime': None
+        }
+        metadata_by_file = {}
+        fallback_metadata = empty_metadata.copy()
+        for file_path in self.current_group_files:
+            metadata = extract_gps_from_file(file_path)
+            metadata_by_file[file_path] = metadata
+            for key in fallback_metadata:
+                if fallback_metadata[key] is None and metadata.get(key) is not None:
+                    fallback_metadata[key] = metadata[key]
+
+        new_rows = []
+        for index, file_path in enumerate(self.current_group_files):
+            metadata = self._merge_media_metadata(
+                metadata_by_file[file_path], fallback_metadata
+            )
+            new_rows.append(self._csv_row(
+                file_path,
+                metadata,
+                self._csv_species_for_file(index, target_species),
+                point_name,
+            ))
+
+        # 读取新版旧记录，删除当前组原有行后再写回，实现可重复分类/更新。
+        existing_rows = []
         try:
-            file_exists = os.path.exists(csv_path)
-            with open(csv_path, 'a', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                # 新文件写表头
-                if not file_exists or os.path.getsize(csv_path) == 0:
-                    writer.writerow(['经度', '纬度', '海拔高度(m)', '物种名', '拍摄时间', '点位名称'])
-                writer.writerow(row)
-        except IOError as e:
-            print(f"警告：无法写入CSV记录 - {e}")
+            if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+                with open(csv_path, 'r', newline='', encoding='utf-8-sig') as source:
+                    reader = csv.DictReader(source)
+                    if reader.fieldnames and '文件名' in reader.fieldnames:
+                        existing_rows = [
+                            {header: row.get(header, '') for header in CSV_HEADERS}
+                            for row in reader
+                        ]
+                    else:
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        stem, ext = os.path.splitext(csv_path)
+                        backup_path = f"{stem}_旧格式备份_{timestamp}{ext}"
+                        counter = 1
+                        while os.path.exists(backup_path):
+                            backup_path = f"{stem}_旧格式备份_{timestamp}_{counter}{ext}"
+                            counter += 1
+                        shutil.copy2(csv_path, backup_path)
+                        self._log(f"旧版CSV已备份到: {backup_path}")
+        except (OSError, csv.Error) as e:
+            self._log(f"读取CSV失败，未写入新记录: {e}", 'warning')
+            return
+
+        current_names = {os.path.basename(path) for path in self.current_group_files}
+        existing_rows = [
+            row for row in existing_rows
+            if not (
+                row.get('点位名称', '') == point_name
+                and row.get('文件名', '') in current_names
+            )
+        ]
+
+        temp_path = f"{csv_path}.tmp"
+        try:
+            with open(temp_path, 'w', newline='', encoding='utf-8-sig') as target:
+                writer = csv.DictWriter(target, fieldnames=CSV_HEADERS)
+                writer.writeheader()
+                writer.writerows(existing_rows)
+                writer.writerows(new_rows)
+            os.replace(temp_path, csv_path)
+        except OSError as e:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            self._log(f"无法写入CSV记录: {e}", 'warning')
     
     # ==================== 物种按钮管理 ====================
     

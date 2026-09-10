@@ -1,23 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller 打包配置（体积优化版）
+"""Portable PyInstaller configuration for a single-file Windows executable."""
+
+from PyInstaller.utils.hooks import collect_all
+
+
+av_datas, av_binaries, av_hiddenimports = collect_all('av')
 
 a = Analysis(
     ['wildcam_sorter.py'],
     pathex=[],
-    binaries=[
-        (r'F:\software\anaconda\envs\wildcam\Library\bin\tcl86t.dll', '.'),
-        (r'F:\software\anaconda\envs\wildcam\Library\bin\tk86t.dll', '.'),
-    ],
-    datas=[
-        # 只带 tcl8.6（8.4/8.5 用不到，删掉省空间）
-        (r'F:\software\anaconda\envs\wildcam\Library\lib\tcl8.6', 'tcl8\\8.6'),
-        (r'F:\software\anaconda\envs\wildcam\Library\lib\tk8.6', 'tk8.6'),
-    ],
-    hiddenimports=['av'],
+    binaries=av_binaries,
+    datas=av_datas,
+    hiddenimports=av_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # 排除用不到的大模块（matplotlib 15MB / imageio_ffmpeg 84MB / imageio）
     excludes=[
         'matplotlib', 'imageio', 'imageio_ffmpeg',
         'tkinter.test', 'tkinter.test.support',
@@ -27,13 +24,16 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
+# Passing binaries and datas directly to EXE creates one self-contained file.
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='WildCamSorter',
     debug=False,
     bootloader_ignore_signals=False,
@@ -45,14 +45,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    # 所有DLL不压缩（UPX压缩DLL会导致加载卡死），只压缩exe和pyd
-    upx_exclude=['*.dll'],
-    name='WildCamSorter',
 )
