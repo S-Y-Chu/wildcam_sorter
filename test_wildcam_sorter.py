@@ -2,6 +2,7 @@ import csv
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from datetime import datetime
@@ -149,6 +150,102 @@ class CaptureModeGroupingTests(unittest.TestCase):
                 0, 0, wildcam_sorter.ORDER_PHOTOS_FIRST
             )
 
+    def test_large_scan_uses_lazy_groups_and_reports_progress(self):
+        class FakeEntry:
+            def __init__(self, name):
+                self.name = name
+
+            def is_file(self, follow_symlinks=False):
+                return True
+
+        class FakeScandir:
+            def __init__(self, count):
+                self.count = count
+
+            def __iter__(self):
+                for index in range(self.count):
+                    yield FakeEntry(f'IMG_{index:06d}.jpg')
+
+            def close(self):
+                pass
+
+        progress = []
+        with patch.object(wildcam_sorter.os, 'scandir', return_value=FakeScandir(100_000)):
+            groups = wildcam_sorter.scan_and_group_files(
+                'X:/huge-camera-folder', 3, 1,
+                wildcam_sorter.ORDER_PHOTOS_FIRST,
+                progress_callback=lambda *values: progress.append(values),
+            )
+
+        self.assertIsInstance(groups, wildcam_sorter.MediaGroupSequence)
+        self.assertEqual(groups.total_files, 100_000)
+        self.assertEqual(len(groups), 25_000)
+        self.assertEqual(
+            [os.path.basename(path) for path in groups[-1]],
+            ['IMG_099996.jpg', 'IMG_099997.jpg', 'IMG_099998.jpg', 'IMG_099999.jpg'],
+        )
+        self.assertGreaterEqual(len(progress), 100)
+
+    def test_large_scan_can_be_cancelled(self):
+        class FakeEntry:
+            name = '001.jpg'
+
+            def is_file(self, follow_symlinks=False):
+                return True
+
+        class FakeScandir:
+            def __iter__(self):
+                for _ in range(10_000):
+                    yield FakeEntry()
+
+            def close(self):
+                pass
+
+        cancel_event = threading.Event()
+        cancel_event.set()
+        with patch.object(wildcam_sorter.os, 'scandir', return_value=FakeScandir()):
+            with self.assertRaises(wildcam_sorter.ScanCancelled):
+                wildcam_sorter.scan_and_group_files(
+                    'X:/huge-camera-folder', 3, 1,
+                    wildcam_sorter.ORDER_PHOTOS_FIRST,
+                    cancel_event=cancel_event,
+                )
+
+
+class MediaJumpTests(unittest.TestCase):
+    def setUp(self):
+        self.groups = wildcam_sorter.MediaGroupSequence(
+            'X:/camera',
+            ['001.mp4', '002.jpg', '003.jpg', '004.jpg',
+             'IMG_0199.mp4', 'IMG_0200.jpg', 'IMG_0201.jpg', 'IMG_0202.jpg'],
+            4,
+        )
+
+    def test_sequence_number_uses_last_numeric_part(self):
+        self.assertEqual(wildcam_sorter.media_sequence_number('CAM_2026_0200.JPG'), 200)
+        self.assertIsNone(wildcam_sorter.media_sequence_number('camera.jpg'))
+
+    def test_numeric_jump_finds_its_group(self):
+        group_index, _, finished = wildcam_sorter.search_media_group_chunk(
+            self.groups, '200', chunk_size=20
+        )
+        self.assertEqual(group_index, 1)
+        self.assertTrue(finished)
+
+    def test_jump_search_can_continue_in_chunks(self):
+        group_index, next_index, finished = wildcam_sorter.search_media_group_chunk(
+            self.groups, 'IMG_0202.jpg', start_index=0, chunk_size=4
+        )
+        self.assertIsNone(group_index)
+        self.assertEqual(next_index, 4)
+        self.assertFalse(finished)
+
+        group_index, _, finished = wildcam_sorter.search_media_group_chunk(
+            self.groups, 'IMG_0202.jpg', start_index=next_index, chunk_size=4
+        )
+        self.assertEqual(group_index, 1)
+        self.assertTrue(finished)
+
 
 class CsvRecordTests(unittest.TestCase):
     def _make_app(self, target_dir, source_dir, files):
@@ -231,6 +328,34 @@ class CsvRecordTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]['文件名'], "001.jpg")
+
+    def test_new_classification_appends_without_rewriting_large_csv(self):
+        metadata = {
+            'longitude': None, 'latitude': None,
+            'altitude': None, 'datetime': None,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = os.path.join(temp_dir, 'POINT_02')
+            os.makedirs(source_dir)
+            csv_path = os.path.join(temp_dir, 'wildcam_records.csv')
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as handle:
+                writer = csv.DictWriter(handle, fieldnames=wildcam_sorter.CSV_HEADERS)
+                writer.writeheader()
+                writer.writerow({header: '' for header in wildcam_sorter.CSV_HEADERS})
+            inode_before = os.stat(csv_path).st_ino
+
+            app = self._make_app(
+                temp_dir, source_dir, [os.path.join(source_dir, '100001.jpg')]
+            )
+            with patch.object(wildcam_sorter, 'extract_gps_from_file',
+                              return_value=metadata.copy()):
+                app._write_csv_record('赤狐', replace_existing=False)
+
+            self.assertEqual(os.stat(csv_path).st_ino, inode_before)
+            with open(csv_path, newline='', encoding='utf-8-sig') as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[-1]['文件名'], '100001.jpg')
 
 
 if __name__ == '__main__':

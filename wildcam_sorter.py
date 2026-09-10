@@ -50,6 +50,7 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from collections.abc import Sequence
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -139,6 +140,75 @@ def is_media_file(filename: str) -> bool:
     return is_video_file(filename) or is_image_file(filename)
 
 
+class ScanCancelled(Exception):
+    """用户取消大目录扫描。"""
+
+
+class MediaGroupSequence(Sequence):
+    """
+    大目录的轻量分组视图。
+
+    内存中只保存文件名；访问某一组时才拼接完整路径并生成该组列表，
+    避免几十万文件时重复保存目录前缀和大量子列表。
+    """
+
+    def __init__(self, source_dir: str, file_names: list, group_size: int):
+        self.source_dir = os.path.abspath(source_dir)
+        self.file_names = file_names
+        self.group_size = group_size
+
+    @property
+    def total_files(self) -> int:
+        return len(self.file_names)
+
+    def __len__(self):
+        if not self.file_names:
+            return 0
+        return (len(self.file_names) + self.group_size - 1) // self.group_size
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        start = index * self.group_size
+        names = self.file_names[start:start + self.group_size]
+        return [os.path.join(self.source_dir, name) for name in names]
+
+
+def media_sequence_number(filename: str):
+    """提取扩展名前最后一段数字作为媒体序号；没有数字时返回 None。"""
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    matches = re.findall(r'\d+', stem)
+    return int(matches[-1]) if matches else None
+
+
+def search_media_group_chunk(groups: MediaGroupSequence, query: str,
+                             start_index: int = 0, chunk_size: int = 20000) -> tuple:
+    """
+    分批查找序号或文件名，返回 (组索引或None, 下一文件索引, 是否完成)。
+    该函数不访问磁盘，可由Tk的after分片调用以保持界面响应。
+    """
+    query = str(query).strip()
+    names = groups.file_names
+    end_index = min(len(names), start_index + max(1, chunk_size))
+    numeric_query = int(query) if query.isdigit() else None
+    query_lower = query.lower()
+
+    for file_index in range(start_index, end_index):
+        filename = names[file_index]
+        if numeric_query is not None:
+            matched = media_sequence_number(filename) == numeric_query
+        else:
+            stem = os.path.splitext(filename)[0]
+            matched = filename.lower() == query_lower or stem.lower() == query_lower
+        if matched:
+            return file_index // groups.group_size, file_index + 1, True
+    return None, end_index, end_index >= len(names)
+
+
 def validate_capture_mode(photo_count: int, video_count: int, media_order: str) -> tuple:
     """校验并规范化拍摄模式，返回 (照片数, 视频数, 顺序)。"""
     try:
@@ -183,7 +253,9 @@ def group_matches_capture_pattern(group: list, photo_count: int,
 
 def scan_and_group_files(source_dir: str, photo_count: int = 3,
                          video_count: int = 1,
-                         media_order: str = ORDER_VIDEOS_FIRST) -> list:
+                         media_order: str = ORDER_VIDEOS_FIRST,
+                         progress_callback=None,
+                         cancel_event=None) -> MediaGroupSequence:
     """
     按用户指定的相机拍摄模式，将自然排序后的媒体文件固定数量分组。
 
@@ -201,23 +273,38 @@ def scan_and_group_files(source_dir: str, photo_count: int = 3,
     photo_count, video_count, media_order = validate_capture_mode(
         photo_count, video_count, media_order
     )
-    all_files = []
+    file_names = []
+    visited_count = 0
     try:
-        for entry in os.listdir(source_dir):
-            full_path = os.path.join(source_dir, entry)
-            if os.path.isfile(full_path) and is_media_file(entry):
-                all_files.append(full_path)
-    except FileNotFoundError:
-        return []
+        iterator = os.scandir(source_dir)
+        try:
+            for entry in iterator:
+                visited_count += 1
+                if cancel_event is not None and visited_count % 256 == 0:
+                    if cancel_event.is_set():
+                        raise ScanCancelled()
+                try:
+                    if entry.is_file(follow_symlinks=False) and is_media_file(entry.name):
+                        file_names.append(entry.name)
+                except OSError:
+                    continue
+                if progress_callback is not None and visited_count % 1000 == 0:
+                    progress_callback('扫描输入文件', visited_count, len(file_names))
+        finally:
+            iterator.close()
+    except (FileNotFoundError, NotADirectoryError):
+        return MediaGroupSequence(source_dir, [], photo_count + video_count)
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise ScanCancelled()
+    if progress_callback is not None:
+        progress_callback('排序媒体文件', visited_count, len(file_names))
 
     # 按文件名自然排序（确保 001, 002, ... 顺序正确）
-    all_files.sort(key=lambda f: natural_sort_key(os.path.basename(f)))
-
-    if not all_files:
-        return []
+    file_names.sort(key=natural_sort_key)
 
     group_size = photo_count + video_count
-    return [all_files[i:i + group_size] for i in range(0, len(all_files), group_size)]
+    return MediaGroupSequence(source_dir, file_names, group_size)
 
 
 def find_existing_species_folders(parent_dir: str, source_dir: str) -> list:
@@ -238,14 +325,124 @@ def find_existing_species_folders(parent_dir: str, source_dir: str) -> list:
     source_basename = os.path.basename(source_dir)
     exclude_names = {source_basename, '空拍', '__pycache__'}
 
-    for entry in os.listdir(parent_dir):
-        full_path = os.path.join(parent_dir, entry)
-        if os.path.isdir(full_path) and entry not in exclude_names:
-            if not entry.startswith('.'):
-                species.append(entry)
+    try:
+        with os.scandir(parent_dir) as entries:
+            for entry in entries:
+                try:
+                    if (entry.is_dir(follow_symlinks=False)
+                            and entry.name not in exclude_names
+                            and not entry.name.startswith('.')):
+                        species.append(entry.name)
+                except OSError:
+                    continue
+    except OSError:
+        return species
 
     species.sort()
     return species
+
+
+def load_progress_snapshot(progress_file: str) -> tuple:
+    """在线程中安全读取进度快照，损坏或不存在时返回空状态。"""
+    if not progress_file or not os.path.exists(progress_file):
+        return set(), {}
+    try:
+        with open(progress_file, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+        return set(data.get('processed', [])), data.get('history', {})
+    except (OSError, json.JSONDecodeError, TypeError):
+        return set(), {}
+
+
+def scan_classified_media(target_dir: str, source_basename: str,
+                          progress_callback=None, cancel_event=None) -> tuple:
+    """扫描输出分类目录，返回物种名列表和“文件名→物种目录”索引。"""
+    species = []
+    existing_files = {}
+    visited = 0
+    if not target_dir or not os.path.isdir(target_dir):
+        return species, existing_files
+
+    try:
+        with os.scandir(target_dir) as root_entries:
+            category_dirs = []
+            for entry in root_entries:
+                try:
+                    if (entry.is_dir(follow_symlinks=False)
+                            and entry.name != source_basename
+                            and not entry.name.startswith('.')):
+                        category_dirs.append((entry.name, entry.path))
+                except OSError:
+                    continue
+    except OSError:
+        return species, existing_files
+
+    species = sorted(name for name, _ in category_dirs if name != '空拍')
+    for category_name, category_path in category_dirs:
+        if cancel_event is not None and cancel_event.is_set():
+            raise ScanCancelled()
+        try:
+            with os.scandir(category_path) as entries:
+                for entry in entries:
+                    visited += 1
+                    if cancel_event is not None and visited % 256 == 0:
+                        if cancel_event.is_set():
+                            raise ScanCancelled()
+                    try:
+                        if entry.is_file(follow_symlinks=False) and is_media_file(entry.name):
+                            existing_files[entry.name] = category_name
+                    except OSError:
+                        continue
+                    if progress_callback is not None and visited % 2000 == 0:
+                        progress_callback('核对已有分类', visited, len(existing_files))
+        except ScanCancelled:
+            raise
+        except OSError:
+            continue
+    return species, existing_files
+
+
+def merge_presorted_progress(groups: Sequence, parent_dir: str, target_dir: str,
+                             existing_files: dict, processed_groups: set,
+                             class_history: dict, progress_callback=None,
+                             cancel_event=None) -> tuple:
+    """用输出目录中的现有文件补充进度；只操作线程内快照。"""
+    processed_groups = set(processed_groups)
+    class_history = dict(class_history)
+    newly_found = 0
+    if not existing_files:
+        return processed_groups, class_history, newly_found
+
+    for group_idx, group in enumerate(groups):
+        if cancel_event is not None and group_idx % 256 == 0:
+            if cancel_event.is_set():
+                raise ScanCancelled()
+        if not group:
+            continue
+        rel_path = os.path.relpath(group[0], parent_dir)
+        if rel_path in processed_groups:
+            continue
+        names = [os.path.basename(path) for path in group]
+        if not all(name in existing_files for name in names):
+            continue
+
+        dest_files = []
+        species_name = None
+        for name in names:
+            category = existing_files[name]
+            dest_files.append(os.path.join(target_dir, category, name))
+            if species_name is None:
+                species_name = category
+        processed_groups.add(rel_path)
+        class_history[rel_path] = {
+            'species': species_name or '未知',
+            'dest_files': dest_files,
+        }
+        newly_found += 1
+        if progress_callback is not None and group_idx % 2000 == 0:
+            progress_callback('匹配已有分类', group_idx + 1, newly_found)
+
+    return processed_groups, class_history, newly_found
 
 
 def extract_gps_from_file(file_path: str) -> dict:
@@ -481,8 +678,9 @@ class MediaPanel:
         self.title_label.config(text=f"{self.label_text} | {os.path.basename(image_path)}")
         
         try:
-            pil_img = Image.open(image_path)
-            photo = self._resize_and_center(pil_img)
+            with Image.open(image_path) as pil_img:
+                pil_img.load()
+                photo = self._resize_and_center(pil_img)
             if photo:
                 self._photo = photo
                 self.media_label.config(image=photo, text='')
@@ -769,7 +967,66 @@ class MediaPanel:
         self._notify_label()
 
 
-# ==================== 全分辨率查看器 ====================
+# ==================== 大目录扫描进度 ====================
+
+class ScanProgressDialog:
+    """非阻塞扫描提示窗；扫描在线程中运行，窗口始终可响应并可取消。"""
+
+    def __init__(self, parent, cancel_callback):
+        self.window = tk.Toplevel(parent)
+        self.window.title("正在读取大目录")
+        self.window.geometry("520x175")
+        self.window.resizable(False, False)
+        self.window.configure(bg=COLOR_BG)
+        self.window.transient(parent)
+        self.window.grab_set()
+        self.window.protocol("WM_DELETE_WINDOW", cancel_callback)
+
+        tk.Label(
+            self.window, text="正在后台读取红外相机数据…",
+            font=("微软雅黑", 12, "bold"), bg=COLOR_BG, fg=COLOR_TEXT
+        ).pack(pady=(20, 8))
+        self.status_label = tk.Label(
+            self.window, text="准备扫描", font=("微软雅黑", 9),
+            bg=COLOR_BG, fg='#BDBDBD'
+        )
+        self.status_label.pack(pady=3)
+        self.progress = ttk.Progressbar(self.window, mode='indeterminate', length=450)
+        self.progress.pack(pady=8)
+        self.progress.start(12)
+        self.cancel_button = tk.Button(
+            self.window, text="取消扫描", font=("微软雅黑", 9),
+            bg='#616161', fg='white', relief=tk.FLAT, cursor='hand2',
+            command=cancel_callback, padx=16, pady=4
+        )
+        self.cancel_button.pack(pady=5)
+
+        self.window.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.window.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.window.winfo_height()) // 3
+        self.window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def update_status(self, phase: str, visited: int, media_count: int):
+        if self.window.winfo_exists():
+            self.status_label.config(
+                text=f"{phase}｜已检查 {visited:,} 项，找到 {media_count:,} 个媒体文件"
+            )
+
+    def mark_cancelling(self):
+        if self.window.winfo_exists():
+            self.status_label.config(text="正在安全停止扫描…")
+            self.cancel_button.config(state=tk.DISABLED)
+
+    def close(self):
+        try:
+            self.progress.stop()
+            self.window.grab_release()
+            self.window.destroy()
+        except tk.TclError:
+            pass
+
+
+# ==================== 路径设置与全分辨率查看器 ====================
 
 class PathSelectDialog:
     """
@@ -1168,7 +1425,9 @@ class FullScreenViewer:
     def _load_image(self):
         """加载静态图片（原始分辨率）"""
         try:
-            self._orig_image = Image.open(self.file_path)
+            with Image.open(self.file_path) as image:
+                image.load()
+                self._orig_image = image.copy()
             self._update_display()
         except Exception as e:
             self.canvas.create_text(700, 400, text=f"无法加载图片: {e}",
@@ -1504,6 +1763,11 @@ class FullScreenViewer:
             self._canvas_resize_after_id = None
         if self._video_cap:
             self._video_cap.release()
+        if self._orig_image is not None:
+            try:
+                self._orig_image.close()
+            except Exception:
+                pass
         self.window.destroy()
 
 
@@ -1546,7 +1810,20 @@ class WildCamSorter:
         self.photo_count = 3             # 每组照片数
         self.video_count = 1             # 每组视频数
         self.media_order = ORDER_VIDEOS_FIRST
-        self.group_pattern_mismatches = []
+        self.group_pattern_mismatch_count = 0
+
+        # ===== 大目录后台扫描状态 =====
+        self._scan_thread = None
+        self._scan_cancel_event = None
+        self._scan_queue = queue.Queue()
+        self._scan_poll_after_id = None
+        self._scan_dialog = None
+        self._scan_token = 0
+        self._closing = False
+        self._progress_save_lock = threading.Lock()
+        self._progress_save_pending = None
+        self._progress_save_thread = None
+        self._jump_search_state = None
         
         # ===== 视频播放状态 =====
         self.video_cap = None             # cv2.VideoCapture 对象（解码线程内使用）
@@ -1781,6 +2058,15 @@ class WildCamSorter:
             command=self._prev_group
         )
         self.btn_prev.pack(side=tk.LEFT, padx=3)
+
+        # 按照片/视频文件序号跳转（放在上一组与下一组之间）
+        self.btn_jump_to_media = tk.Button(
+            right_frame, text="跳转至", font=("微软雅黑", 10),
+            bg='#6A1B9A', fg='white', activebackground='#8E24AA',
+            relief=tk.FLAT, cursor='hand2', padx=10, pady=6,
+            command=self._prompt_jump_to_media
+        )
+        self.btn_jump_to_media.pack(side=tk.LEFT, padx=3)
         
         # 下一组
         self.btn_next = tk.Button(
@@ -1847,81 +2133,246 @@ class WildCamSorter:
     
     # ==================== 数据初始化 ====================
     
-    def _init_from_source(self, source_dir: str):
-        """从输入文件夹初始化数据（只扫描分组，不依赖输出目录）"""
-        self.source_dir = os.path.abspath(source_dir)
-        self.parent_dir = os.path.dirname(self.source_dir)
-        # 注意：不默认设置 target_dir，输出目录必须由用户选择
-        
-        self._log(f"打开文件夹: {self.source_dir}")
-        
+    def _start_background_load(self, source_dir: str, target_dir: str,
+                               photo_count=None, video_count=None, media_order=None):
+        """在工作线程中扫描输入、进度和已有分类，保证Tk主线程不被大目录阻塞。"""
+        self._stop_video()
+        self._jump_search_state = None
+        if hasattr(self, 'btn_jump_to_media'):
+            self.btn_jump_to_media.config(state=tk.NORMAL, text="跳转至")
+        if self._scan_cancel_event is not None:
+            self._scan_cancel_event.set()
+
+        self._scan_token += 1
+        token = self._scan_token
+        cancel_event = threading.Event()
+        self._scan_cancel_event = cancel_event
+        self._scan_queue = queue.Queue()
+        self._scan_dialog = ScanProgressDialog(self.root, self._cancel_background_scan)
+        self.btn_open.config(state=tk.DISABLED)
+        self.btn_target.config(state=tk.DISABLED)
+        self.label_status.config(text="正在后台读取数据，可随时取消…", fg='#80CBC4')
+
+        source_dir = os.path.abspath(source_dir)
+        target_dir = os.path.abspath(target_dir)
+        photo_count = self.photo_count if photo_count is None else photo_count
+        video_count = self.video_count if video_count is None else video_count
+        media_order = self.media_order if media_order is None else media_order
+
+        def report(phase, visited, media_count):
+            self._scan_queue.put((token, 'progress', phase, visited, media_count))
+
+        def worker():
+            try:
+                parent_dir = os.path.dirname(source_dir)
+                groups = scan_and_group_files(
+                    source_dir, photo_count, video_count, media_order,
+                    progress_callback=report, cancel_event=cancel_event
+                )
+                if cancel_event.is_set():
+                    raise ScanCancelled()
+
+                progress_file = os.path.join(parent_dir, '.wildcam_progress.json')
+                processed_groups, class_history = load_progress_snapshot(progress_file)
+
+                # 已有进度时只读取类别目录名，避免每次重启都遍历庞大的输出树。
+                if processed_groups:
+                    species_list = find_existing_species_folders(target_dir, source_dir)
+                    existing_files = {}
+                else:
+                    species_list, existing_files = scan_classified_media(
+                        target_dir, os.path.basename(source_dir), report, cancel_event
+                    )
+
+                processed_groups, class_history, newly_found = merge_presorted_progress(
+                    groups, parent_dir, target_dir, existing_files,
+                    processed_groups, class_history, report, cancel_event
+                )
+
+                mismatch_count = 0
+                first_unprocessed = 0
+                skipped_count = 0
+                total_groups = len(groups)
+                expected_types = expected_capture_types(
+                    photo_count, video_count, media_order
+                )
+                for index in range(total_groups):
+                    if index % 256 == 0 and cancel_event.is_set():
+                        raise ScanCancelled()
+                    start = index * groups.group_size
+                    group_names = groups.file_names[start:start + groups.group_size]
+                    actual_types = [
+                        'video' if is_video_file(name) else 'image'
+                        for name in group_names
+                    ]
+                    if actual_types != expected_types:
+                        mismatch_count += 1
+                    first_path = (
+                        os.path.join(source_dir, group_names[0]) if group_names else ''
+                    )
+                    rel_path = os.path.relpath(first_path, parent_dir) if first_path else ''
+                    if skipped_count == index and rel_path in processed_groups:
+                        skipped_count += 1
+                    elif skipped_count == index:
+                        first_unprocessed = index
+                    if report is not None and index and index % 5000 == 0:
+                        report('建立分组索引', index, groups.total_files)
+
+                if total_groups and skipped_count >= total_groups:
+                    first_unprocessed = total_groups - 1
+
+                result = {
+                    'source_dir': source_dir,
+                    'target_dir': target_dir,
+                    'parent_dir': parent_dir,
+                    'progress_file': progress_file,
+                    'groups': groups,
+                    'processed_groups': processed_groups,
+                    'class_history': class_history,
+                    'species_list': species_list,
+                    'mismatch_count': mismatch_count,
+                    'first_unprocessed': first_unprocessed,
+                    'skipped_count': skipped_count,
+                    'newly_found': newly_found,
+                    'photo_count': photo_count,
+                    'video_count': video_count,
+                    'media_order': media_order,
+                }
+                self._scan_queue.put((token, 'done', result))
+            except ScanCancelled:
+                self._scan_queue.put((token, 'cancelled'))
+            except Exception as exc:
+                self._scan_queue.put((token, 'error', str(exc), traceback.format_exc()))
+
+        self._scan_thread = threading.Thread(target=worker, daemon=True)
+        self._scan_thread.start()
+        self._poll_background_scan()
+
+    def _cancel_background_scan(self):
+        """请求扫描线程在安全检查点停止。"""
+        if self._scan_cancel_event is not None:
+            self._scan_cancel_event.set()
+        if self._scan_dialog is not None:
+            self._scan_dialog.mark_cancelling()
+
+    def _finish_background_scan_ui(self):
+        if self._scan_poll_after_id:
+            try:
+                self.root.after_cancel(self._scan_poll_after_id)
+            except tk.TclError:
+                pass
+            self._scan_poll_after_id = None
+        if self._scan_dialog is not None:
+            self._scan_dialog.close()
+            self._scan_dialog = None
+        self.btn_open.config(state=tk.NORMAL)
+        self.btn_target.config(state=tk.NORMAL)
+
+    def _poll_background_scan(self):
+        """只在Tk主线程消费工作线程消息并更新界面。"""
+        if self._closing:
+            return
+        terminal = None
+        latest_progress = None
+        try:
+            while True:
+                message = self._scan_queue.get_nowait()
+                if message[0] != self._scan_token:
+                    continue
+                if message[1] == 'progress':
+                    latest_progress = message
+                else:
+                    terminal = message
+        except queue.Empty:
+            pass
+
+        if latest_progress and self._scan_dialog is not None:
+            _, _, phase, visited, media_count = latest_progress
+            self._scan_dialog.update_status(phase, visited, media_count)
+            self.label_status.config(
+                text=f"{phase}：已检查 {visited:,} 项，找到 {media_count:,} 个媒体文件",
+                fg='#80CBC4'
+            )
+
+        if terminal is None:
+            self._scan_poll_after_id = self.root.after(100, self._poll_background_scan)
+            return
+
+        self._finish_background_scan_ui()
+        if terminal[1] == 'cancelled':
+            self.label_status.config(text="已取消扫描，原数据未发生变化", fg='#FFB74D')
+            return
+        if terminal[1] == 'error':
+            _, _, error_text, details = terminal
+            self._log(f"读取大目录失败: {details}", 'error')
+            self.label_status.config(text=f"读取失败：{error_text}", fg='#FF6B6B')
+            messagebox.showerror("读取文件夹失败", f"无法完成目录扫描：\n\n{error_text}")
+            return
+        self._apply_background_load(terminal[2])
+
+    def _apply_background_load(self, result: dict):
+        """把线程计算好的不可变结果一次性切换到界面状态。"""
+        old_target_dir = self.target_dir
+        if old_target_dir and old_target_dir != result['target_dir'] and self._log_handler:
+            try:
+                self.logger.removeHandler(self._log_handler)
+                self._log_handler.close()
+            except Exception:
+                pass
+            self._log_handler = None
+        self.source_dir = result['source_dir']
+        self.target_dir = result['target_dir']
+        self.parent_dir = result['parent_dir']
+        self.photo_count = result['photo_count']
+        self.video_count = result['video_count']
+        self.media_order = result['media_order']
+        self.progress_file = result['progress_file']
+        self.groups = result['groups']
+        self.processed_groups = result['processed_groups']
+        self.class_history = result['class_history']
+        self.species_list = result['species_list']
+        self.group_pattern_mismatch_count = result['mismatch_count']
+        self.current_group_index = -1
+        self._panels_ready = False
+
         self.label_folder.config(text=f"📁 {self.source_dir}")
-        self.label_target.config(text=f"📤 输出到: (未选择)")
-        
-        # 按用户设定的拍摄模式扫描分组；末尾不完整组也会完整保留。
-        self.groups = scan_and_group_files(
-            self.source_dir,
-            photo_count=self.photo_count,
-            video_count=self.video_count,
-            media_order=self.media_order
-        )
-        
+        self.label_target.config(text=f"📤 输出到: {self.target_dir}")
+        self._update_capture_mode_label()
+        self._rebuild_species_buttons()
+        self._log(f"打开文件夹: {self.source_dir}")
+
         if not self.groups:
+            self.label_stats.config(text="无媒体文件")
+            self.label_status.config(text="未找到可识别的媒体文件", fg='#FFB74D')
             messagebox.showwarning(
                 "未找到媒体文件",
-                f"在选定文件夹中未找到可识别的视频或图片文件。\n\n"
-                f"支持的视频格式：AVI, MP4, MOV, MKV, WMV 等\n"
-                f"支持的图片格式：JPG, JPEG, PNG, BMP 等"
+                "在选定文件夹中未找到可识别的视频或图片文件。"
             )
-            self.label_stats.config(text="无媒体文件")
             return
-        
-        total_files = sum(len(g) for g in self.groups)
-        self.label_stats.config(text=f"共 {len(self.groups)} 组 / {total_files} 个文件")
-        self._update_capture_mode_label()
 
-        self.group_pattern_mismatches = [
-            index for index, group in enumerate(self.groups)
-            if not group_matches_capture_pattern(
-                group, self.photo_count, self.video_count, self.media_order
-            )
-        ]
-        if self.group_pattern_mismatches:
-            mismatch_count = len(self.group_pattern_mismatches)
+        self.label_stats.config(
+            text=f"共 {len(self.groups):,} 组 / {self.groups.total_files:,} 个文件"
+        )
+        mismatch_count = self.group_pattern_mismatch_count
+        if mismatch_count:
             self._log(f"有 {mismatch_count} 组与拍摄模式不完全一致", 'warning')
             messagebox.showwarning(
                 "拍摄模式核对",
-                f"有 {mismatch_count} 组与当前拍摄模式不完全一致（可能包含最后一个不完整组）。\n\n"
-                "所有文件仍会保留并显示，不会遗漏；如果分组不对，请点击工具栏的“路径与模式”重新设置。"
+                f"有 {mismatch_count:,} 组与当前拍摄模式不完全一致（可能包含末尾不完整组）。\n\n"
+                "所有文件仍会保留；如果分组不对，请点击“路径与模式”重新设置。"
             )
-        
-        # 输出目录尚未确定，等用户选择后由 _finalize_setup 完成剩余初始化
-        self.current_group_index = -1
-        self._panels_ready = False
-    
-    def _finalize_setup(self):
-        """输出目录确定后执行完整初始化（物种扫描、进度、预分检测、加载首组）"""
-        # 扫描已有物种文件夹（只来自输出目录）
-        self._scan_species_folders()
-        
-        # 加载进度记录
-        self._load_progress()
-        
-        # ---- 检测已手动分好的照片（从输出文件夹中识别）----
-        self._detect_presorted_files()
-        
-        # 找到第一个未处理的组
-        first_unprocessed = 0
-        skipped_count = 0
-        for i in range(len(self.groups)):
-            rel = self._get_group_rel_path(i)
-            if rel not in self.processed_groups:
-                first_unprocessed = i
-                break
-            skipped_count += 1
-        
-        # 延迟加载首组：等待布局完成后渲染
-        self.root.after(400, lambda: self._on_panels_ready(first_unprocessed, skipped_count))
+
+        newly_found = result['newly_found']
+        if newly_found:
+            self._save_progress()
+            self._log(f"检测到 {newly_found} 组已手动分好，自动跳过")
+
+        self.root.after(
+            150,
+            lambda: self._on_panels_ready(
+                result['first_unprocessed'], result['skipped_count']
+            )
+        )
     
     def _show_path_dialog(self):
         """
@@ -1940,18 +2391,9 @@ class WildCamSorter:
         
         if dlg.result:
             in_path, out_path, photo_count, video_count, media_order = dlg.result
-            self._stop_video()
-            self.processed_groups = set()
-            self.class_history = {}
-            self.photo_count = photo_count
-            self.video_count = video_count
-            self.media_order = media_order
-            self._init_from_source(in_path)
-            self.target_dir = out_path
-            self.label_target.config(text=f"📤 输出到: {self.target_dir}")
-            self._log(f"设置输出目录: {self.target_dir}")
-            # 完成初始化（物种扫描、进度、预分检测、加载首组）
-            self._finalize_setup()
+            self._start_background_load(
+                in_path, out_path, photo_count, video_count, media_order
+            )
         else:
             # 用户取消：保持空状态，提示可用工具栏按钮
             self.label_status.config(
@@ -1984,11 +2426,11 @@ class WildCamSorter:
             initialdir=initial
         )
         if folder:
-            self.target_dir = os.path.abspath(folder)
-            self._log(f"设置输出目录: {self.target_dir}")
-            self.label_target.config(text=f"📤 输出到: {self.target_dir}")
-            # 输出目录确定后完成初始化
-            self._finalize_setup()
+            if self.source_dir:
+                self._start_background_load(self.source_dir, folder)
+            else:
+                self.target_dir = os.path.abspath(folder)
+                self.label_target.config(text=f"📤 输出到: {self.target_dir}")
     
     def _scan_species_folders(self):
         """扫描输出文件夹中已有的物种文件夹并重建按钮（类别只来自输出目录）"""
@@ -2008,109 +2450,54 @@ class WildCamSorter:
     
     # ==================== 进度追踪 ====================
     
-    def _load_progress(self):
-        """读取进度文件（.wildcam_progress.json），含分类历史记录"""
-        if not self.parent_dir:
-            self.processed_groups = set()
-            self.class_history = {}
-            return
-        
-        self.progress_file = os.path.join(self.parent_dir, '.wildcam_progress.json')
-        if os.path.exists(self.progress_file):
-            try:
-                with open(self.progress_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                self.processed_groups = set(data.get('processed', []))
-                # class_history: {rel_path: {"species": "牛", "dest_files": ["完整目标路径", ...]}}
-                self.class_history = data.get('history', {})
-            except (json.JSONDecodeError, IOError):
-                self.processed_groups = set()
-                self.class_history = {}
-        else:
-            self.processed_groups = set()
-            self.class_history = {}
-    
     def _save_progress(self):
-        """保存进度文件（含分类历史）"""
+        """合并并在后台原子保存进度，避免大型历史记录阻塞界面。"""
         if not self.progress_file:
             return
-        try:
-            with open(self.progress_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'processed': list(self.processed_groups),
-                    'history': self.class_history
-                }, f, ensure_ascii=False, indent=2)
-        except IOError:
-            pass
-    
-    def _detect_presorted_files(self):
-        """
-        扫描目标文件夹中已有的物种子文件夹，检测哪些组已经被手动分好。
-        如果一组的所有文件都已存在于目标文件夹的某个子目录中，自动标记为已处理。
-        """
-        if not self.target_dir or not os.path.isdir(self.target_dir):
-            return
-        
-        # 收集目标文件夹中所有已存在的文件名 → 所在子文件夹
-        existing_files = {}  # {filename: subfolder_name}
-        source_basename = os.path.basename(self.source_dir) if self.source_dir else ""
-        
-        for entry in os.listdir(self.target_dir):
-            sub_path = os.path.join(self.target_dir, entry)
-            if os.path.isdir(sub_path) and entry != source_basename and not entry.startswith('.'):
+        snapshot = (
+            self.progress_file,
+            list(self.processed_groups),
+            dict(self.class_history),
+        )
+        with self._progress_save_lock:
+            self._progress_save_pending = snapshot
+            if self._progress_save_thread is not None and self._progress_save_thread.is_alive():
+                return
+            self._progress_save_thread = threading.Thread(
+                target=self._progress_save_worker, daemon=True
+            )
+            self._progress_save_thread.start()
+
+    def _progress_save_worker(self):
+        """只写最新进度快照；连续分类时自动合并中间保存请求。"""
+        while True:
+            with self._progress_save_lock:
+                snapshot = self._progress_save_pending
+                self._progress_save_pending = None
+            if snapshot is None:
+                with self._progress_save_lock:
+                    if self._progress_save_pending is None:
+                        self._progress_save_thread = None
+                        return
+                continue
+
+            progress_file, processed, history = snapshot
+            temp_path = f"{progress_file}.tmp"
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as handle:
+                    json.dump(
+                        {'processed': processed, 'history': history},
+                        handle, ensure_ascii=False, separators=(',', ':')
+                    )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, progress_file)
+            except OSError:
                 try:
-                    for fname in os.listdir(sub_path):
-                        full = os.path.join(sub_path, fname)
-                        if os.path.isfile(full) and is_media_file(fname):
-                            existing_files[fname] = entry
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
                 except OSError:
                     pass
-        
-        if not existing_files:
-            return
-        
-        # 检查每个组：如果所有源文件都已存在于目标文件夹中，标记为已处理
-        newly_found = 0
-        for group_idx, group in enumerate(self.groups):
-            rel_path = self._get_group_rel_path(group_idx)
-            if rel_path and rel_path in self.processed_groups:
-                continue  # 已标记
-            
-            # 检查组内所有文件是否都已存在于目标文件夹中
-            all_found = True
-            for file_path in group:
-                fname = os.path.basename(file_path)
-                if fname not in existing_files:
-                    all_found = False
-                    break
-            
-            if all_found and group:
-                # 自动标记为已处理
-                dest_files = []
-                species = None
-                for file_path in group:
-                    fname = os.path.basename(file_path)
-                    sub = existing_files.get(fname, '')
-                    if sub:
-                        dest_files.append(os.path.join(self.target_dir, sub, fname))
-                        if species is None:
-                            species = sub
-                
-                self.processed_groups.add(rel_path)
-                if dest_files:
-                    self.class_history[rel_path] = {
-                        'species': species or '未知',
-                        'dest_files': dest_files
-                    }
-                newly_found += 1
-        
-        if newly_found > 0:
-            self._save_progress()
-            self._log(f"检测到 {newly_found} 组已手动分好，自动跳过")
-            self.label_status.config(
-                text=f"🔍 检测到 {newly_found} 组已手动分好，自动跳过",
-                fg='#4CAF50'
-            )
     
     def _get_group_rel_path(self, group_index: int = None) -> str:
         """获取当前组的标识（第一个文件的相对路径），用于进度追踪"""
@@ -2803,7 +3190,8 @@ class WildCamSorter:
     
     def _do_classify(self, target_species: str = None, auto_advance: bool = True):
         rel_path = self._get_group_rel_path()
-        if rel_path and rel_path in self.processed_groups:
+        was_reclassification = bool(rel_path and rel_path in self.processed_groups)
+        if was_reclassification:
             undone = self._undo_group_copies(self.current_group_index)
             if undone > 0:
                 self.label_status.config(
@@ -2907,7 +3295,7 @@ class WildCamSorter:
             self._log(f"分类错误详情: {errors}", 'warning')
         
         # ---- CSV记录（所有分类均记录：空拍 + 物种）----
-        self._write_csv_record(target_species)
+        self._write_csv_record(target_species, replace_existing=was_reclassification)
         
         # 状态栏反馈
         parts = []
@@ -2997,7 +3385,7 @@ class WildCamSorter:
             '点位名称': point_name,
         }
 
-    def _write_csv_record(self, target_species: str = None):
+    def _write_csv_record(self, target_species: str = None, replace_existing: bool = True):
         """
         将当前组逐文件写入CSV：一个图片或视频对应一行。
 
@@ -3037,49 +3425,54 @@ class WildCamSorter:
                 point_name,
             ))
 
-        # 读取新版旧记录，删除当前组原有行后再写回，实现可重复分类/更新。
-        existing_rows = []
+        # 新分类直接追加，写入量与历史CSV大小无关；只有重新分类才流式重写。
+        has_current_schema = False
         try:
             if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
                 with open(csv_path, 'r', newline='', encoding='utf-8-sig') as source:
-                    reader = csv.DictReader(source)
-                    if reader.fieldnames and '文件名' in reader.fieldnames:
-                        existing_rows = [
-                            {header: row.get(header, '') for header in CSV_HEADERS}
-                            for row in reader
-                        ]
-                    else:
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        stem, ext = os.path.splitext(csv_path)
-                        backup_path = f"{stem}_旧格式备份_{timestamp}{ext}"
-                        counter = 1
-                        while os.path.exists(backup_path):
-                            backup_path = f"{stem}_旧格式备份_{timestamp}_{counter}{ext}"
-                            counter += 1
-                        shutil.copy2(csv_path, backup_path)
-                        self._log(f"旧版CSV已备份到: {backup_path}")
+                    reader = csv.reader(source)
+                    header = next(reader, [])
+                    has_current_schema = '文件名' in header
+                if not has_current_schema:
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    stem, ext = os.path.splitext(csv_path)
+                    backup_path = f"{stem}_旧格式备份_{timestamp}{ext}"
+                    counter = 1
+                    while os.path.exists(backup_path):
+                        backup_path = f"{stem}_旧格式备份_{timestamp}_{counter}{ext}"
+                        counter += 1
+                    shutil.copy2(csv_path, backup_path)
+                    self._log(f"旧版CSV已备份到: {backup_path}")
         except (OSError, csv.Error) as e:
             self._log(f"读取CSV失败，未写入新记录: {e}", 'warning')
             return
 
-        current_names = {os.path.basename(path) for path in self.current_group_files}
-        existing_rows = [
-            row for row in existing_rows
-            if not (
-                row.get('点位名称', '') == point_name
-                and row.get('文件名', '') in current_names
-            )
-        ]
+        if has_current_schema and not replace_existing:
+            try:
+                with open(csv_path, 'a', newline='', encoding='utf-8-sig') as target:
+                    csv.DictWriter(target, fieldnames=CSV_HEADERS).writerows(new_rows)
+                return
+            except (OSError, csv.Error) as e:
+                self._log(f"无法追加CSV记录: {e}", 'warning')
+                return
 
+        current_names = {os.path.basename(path) for path in self.current_group_files}
         temp_path = f"{csv_path}.tmp"
         try:
             with open(temp_path, 'w', newline='', encoding='utf-8-sig') as target:
                 writer = csv.DictWriter(target, fieldnames=CSV_HEADERS)
                 writer.writeheader()
-                writer.writerows(existing_rows)
+                if has_current_schema:
+                    with open(csv_path, 'r', newline='', encoding='utf-8-sig') as source:
+                        reader = csv.DictReader(source)
+                        for row in reader:
+                            if (row.get('点位名称', '') == point_name
+                                    and row.get('文件名', '') in current_names):
+                                continue
+                            writer.writerow({header: row.get(header, '') for header in CSV_HEADERS})
                 writer.writerows(new_rows)
             os.replace(temp_path, csv_path)
-        except OSError as e:
+        except (OSError, csv.Error) as e:
             try:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -3147,6 +3540,64 @@ class WildCamSorter:
         """跳转下一组"""
         if self.current_group_index + 1 < len(self.groups):
             self._load_group(self.current_group_index + 1)
+
+    def _prompt_jump_to_media(self):
+        """询问照片/视频序号，并启动不阻塞界面的分批查找。"""
+        if not isinstance(self.groups, MediaGroupSequence) or not self.groups:
+            messagebox.showinfo("跳转至", "请先打开包含媒体文件的文件夹。")
+            return
+        query = simpledialog.askstring(
+            "跳转至照片/视频",
+            "请输入照片或视频的序号：\n\n"
+            "例如输入 200，可查找 200.jpg、IMG_0200.mp4 等文件所在的组。\n"
+            "也可以直接输入完整文件名。",
+            parent=self.root
+        )
+        if query is None:
+            return
+        query = query.strip()
+        if not query:
+            messagebox.showwarning("跳转至", "请输入有效的序号或文件名。")
+            return
+
+        self._jump_search_state = {'query': query, 'next_index': 0}
+        self.btn_jump_to_media.config(state=tk.DISABLED, text="查找中…")
+        self.label_status.config(text=f"正在查找序号 {query}…", fg='#CE93D8')
+        self.root.after(1, self._continue_jump_to_media)
+
+    def _continue_jump_to_media(self):
+        """每次只检查一小批内存文件名，让百万级查找期间仍可操作界面。"""
+        state = self._jump_search_state
+        if state is None or not isinstance(self.groups, MediaGroupSequence):
+            return
+        group_index, next_index, finished = search_media_group_chunk(
+            self.groups, state['query'], state['next_index']
+        )
+        state['next_index'] = next_index
+
+        if group_index is not None:
+            query = state['query']
+            self._jump_search_state = None
+            self.btn_jump_to_media.config(state=tk.NORMAL, text="跳转至")
+            self._load_group(group_index)
+            self.label_status.config(
+                text=f"已跳到序号 {query} 所在的第 {group_index + 1:,} 组",
+                fg='#4CAF50'
+            )
+            return
+        if finished:
+            query = state['query']
+            self._jump_search_state = None
+            self.btn_jump_to_media.config(state=tk.NORMAL, text="跳转至")
+            self.label_status.config(text=f"没有找到序号或文件名：{query}", fg='#FFB74D')
+            messagebox.showinfo("未找到", f"没有找到序号或文件名：{query}")
+            return
+
+        self.label_status.config(
+            text=f"正在查找 {state['query']}：已检查 {next_index:,}/{self.groups.total_files:,} 个文件",
+            fg='#CE93D8'
+        )
+        self.root.after(1, self._continue_jump_to_media)
     
     def _jump_to_unprocessed(self):
         """跳转到第一个未处理的组"""
@@ -3209,6 +3660,15 @@ class WildCamSorter:
     
     def _on_close(self):
         """关闭窗口清理"""
+        self._closing = True
+        if self._scan_cancel_event is not None:
+            self._scan_cancel_event.set()
+        if self._scan_poll_after_id:
+            try:
+                self.root.after_cancel(self._scan_poll_after_id)
+            except tk.TclError:
+                pass
+            self._scan_poll_after_id = None
         self._log(f"程序关闭")
         self._stop_video()
         self.root.destroy()
