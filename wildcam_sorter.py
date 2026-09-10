@@ -3,7 +3,7 @@
 """
 野外相机数据分类工具 (WildCam Sorter)
 ======================================
-功能：快速浏览野外相机拍摄的视频和截图（1视频+3截图为一组），
+功能：快速浏览野外相机拍摄的视频和照片（拍摄模式可配置），
       将其分类复制到对应的物种文件夹或空拍文件夹中。
 
 界面布局（上下排列）：
@@ -65,6 +65,14 @@ VIDEO_EXTENSIONS = {'.avi', '.mp4', '.mov', '.mkv', '.wmv', '.webm', '.mts', '.m
 
 # 图片扩展名集合（小写）
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.gif', '.webp'}
+
+# 相机拍摄顺序
+ORDER_PHOTOS_FIRST = 'photos_first'
+ORDER_VIDEOS_FIRST = 'videos_first'
+ORDER_DISPLAY_NAMES = {
+    ORDER_PHOTOS_FIRST: '照片在前',
+    ORDER_VIDEOS_FIRST: '视频在前',
+}
 
 # 媒体文件的宽高比（3:2 = 1.5），用于显示区域的缩放计算
 MEDIA_ASPECT_RATIO = 3.0 / 2.0
@@ -131,23 +139,68 @@ def is_media_file(filename: str) -> bool:
     return is_video_file(filename) or is_image_file(filename)
 
 
-def scan_and_group_files(source_dir: str) -> list:
+def validate_capture_mode(photo_count: int, video_count: int, media_order: str) -> tuple:
+    """校验并规范化拍摄模式，返回 (照片数, 视频数, 顺序)。"""
+    try:
+        photo_count = int(photo_count)
+        video_count = int(video_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("照片数和视频数必须是整数") from exc
+
+    if photo_count < 0 or video_count < 0:
+        raise ValueError("照片数和视频数不能小于 0")
+    if photo_count + video_count <= 0:
+        raise ValueError("照片数和视频数不能同时为 0")
+    if photo_count > 99 or video_count > 99:
+        raise ValueError("照片数和视频数不能大于 99")
+    if media_order not in ORDER_DISPLAY_NAMES:
+        raise ValueError("请选择照片在前或视频在前")
+    return photo_count, video_count, media_order
+
+
+def expected_capture_types(photo_count: int, video_count: int, media_order: str) -> list:
+    """返回一组拍摄模式对应的媒体类型序列。"""
+    photo_count, video_count, media_order = validate_capture_mode(
+        photo_count, video_count, media_order
+    )
+    photos = ['image'] * photo_count
+    videos = ['video'] * video_count
+    return photos + videos if media_order == ORDER_PHOTOS_FIRST else videos + photos
+
+
+def group_matches_capture_pattern(group: list, photo_count: int,
+                                  video_count: int, media_order: str) -> bool:
+    """判断一组文件是否完整符合所选拍摄模式。末尾不完整组返回 False。"""
+    expected = expected_capture_types(photo_count, video_count, media_order)
+    if len(group) != len(expected):
+        return False
+    actual = [
+        'video' if is_video_file(os.path.basename(path)) else 'image'
+        for path in group
+    ]
+    return actual == expected
+
+
+def scan_and_group_files(source_dir: str, photo_count: int = 3,
+                         video_count: int = 1,
+                         media_order: str = ORDER_VIDEOS_FIRST) -> list:
     """
-    扫描源文件夹，自动识别视频和其对应的截图并分组。
-    
-    分组规则（智能识别）：
-        - 找到所有视频文件（.AVI/.MP4/.MOV等）
-        - 每个视频与它之后、下一个视频之前的所有照片归为一组
-        - 例如：111.MOV(视频), 112.JPG, 113.JPG, 114.JPG, 115.JPG, 116.AVI(视频)
-          → 组1: [111.MOV, 112.JPG, 113.JPG, 114.JPG, 115.JPG]
-          → 组2: [116.AVI, ...]
-        - 第一个视频之前的照片（如果有）单独成组（纯照片组）
+    按用户指定的相机拍摄模式，将自然排序后的媒体文件固定数量分组。
+
+    例如“3 张照片 + 1 个视频、照片在前”，每 4 个文件为一组；
+    最后一组即使数量不足也会保留，确保任何媒体文件都不会被遗漏。
     
     参数：
         source_dir: 源文件夹路径
+        photo_count: 每组照片数
+        video_count: 每组视频数（可以为 0，表示纯照片模式）
+        media_order: photos_first 或 videos_first
     返回：
         分组列表，每组是一个文件路径列表
     """
+    photo_count, video_count, media_order = validate_capture_mode(
+        photo_count, video_count, media_order
+    )
     all_files = []
     try:
         for entry in os.listdir(source_dir):
@@ -163,33 +216,8 @@ def scan_and_group_files(source_dir: str) -> list:
     if not all_files:
         return []
 
-    # 找出所有视频文件的索引位置
-    video_indices = []
-    for i, file_path in enumerate(all_files):
-        if is_video_file(os.path.basename(file_path)):
-            video_indices.append(i)
-
-    # 如果没有视频文件，所有照片作为一组
-    if not video_indices:
-        return [all_files]
-
-    # 按视频分组：每个视频 + 它之后直到下一个视频之前的照片
-    groups = []
-    for vi, video_idx in enumerate(video_indices):
-        group = [all_files[video_idx]]  # 视频本身
-        # 下一个视频的索引（如果当前是最后一个视频，则到文件列表末尾）
-        next_idx = video_indices[vi + 1] if vi + 1 < len(video_indices) else len(all_files)
-        # 收集视频后面的照片（直到下一个视频之前）
-        for j in range(video_idx + 1, next_idx):
-            group.append(all_files[j])
-        groups.append(group)
-
-    # 处理第一个视频之前的照片（如果有的话，如纯照片开头）
-    if video_indices[0] > 0:
-        prefix_group = all_files[:video_indices[0]]
-        groups.insert(0, prefix_group)
-
-    return groups
+    group_size = photo_count + video_count
+    return [all_files[i:i + group_size] for i in range(0, len(all_files), group_size)]
 
 
 def find_existing_species_folders(parent_dir: str, source_dir: str) -> list:
@@ -333,17 +361,15 @@ class MediaPanel:
     单个媒体显示面板（视频或图片）。
     封装了显示 Label、文件名标签、选中状态指示器的创建和更新逻辑。
     
-    用于2x2网格中的每一个格子：
-        - 左上：视频面板（支持播放）
-        - 右上/左下/右下：截图面板（静态图片）
+    用于2x2网格和溢出行中的每一个格子；照片、视频可出现在任意位置。
     """
     
     def __init__(self, parent, index: int, label_text: str):
         """
         参数：
             parent: 父容器 Frame
-            index: 在组内的索引（0=视频, 1=截图1, 2=截图2, 3=截图3）
-            label_text: 面板标题（如 "🎬 视频"、"📷 截图1"）
+            index: 文件在组内的索引
+            label_text: 面板标题（如 "🎬 视频 1"、"📷 照片 1"）
         """
         self.parent = parent
         self.index = index
@@ -469,6 +495,35 @@ class MediaPanel:
         except Exception as e:
             self.media_label.config(image='', text=f"⚠ 加载失败\n{os.path.basename(image_path)}")
             self.title_label.config(text=f"{self.label_text} | ❌ {e}")
+
+    def display_video_thumbnail(self, video_path: str, retry: int = 0):
+        """显示视频首帧缩略图；点击后仍由全屏视频播放器打开。"""
+        self.file_path = video_path
+        self.title_label.config(text=f"{self.label_text} | {os.path.basename(video_path)}")
+        cap = None
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise OSError("无法读取视频首帧")
+            ok, frame = cap.read()
+            if not ok:
+                raise OSError("无法读取视频首帧")
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            photo = self._resize_and_center(Image.fromarray(frame_rgb))
+            if photo:
+                self._photo = photo
+                self.media_label.config(image=photo, text='')
+            elif retry < 3:
+                self.media_label.config(image='', text="")
+                self.frame.after(150, lambda: self.display_video_thumbnail(video_path, retry + 1))
+            else:
+                self.media_label.config(image='', text="🎬 视频\n点击打开播放器")
+        except Exception:
+            self._photo = None
+            self.media_label.config(image='', text="🎬 视频\n点击打开播放器")
+        finally:
+            if cap is not None:
+                cap.release()
     
     def display_placeholder(self, text: str = "(无文件)"):
         """显示占位文本（当没有对应文件时）"""
@@ -718,28 +773,32 @@ class MediaPanel:
 
 class PathSelectDialog:
     """
-    启动路径选择对话框：在一个窗口内同时选择输入文件夹和输出文件夹。
+    启动设置对话框：同时选择输入/输出文件夹和相机拍摄模式。
     
     布局：
         ┌──────────────────────────────────────────┐
-        │     请选择照片输入和分类输出路径            │
+        │       请选择路径和相机拍摄模式              │
         │  照片输入路径 [输入框.........] [📁按钮]   │
         │  照片输出路径 [输入框.........] [📁按钮]   │
+        │  拍摄模式 [3]张照片 + [1]个视频 [视频在前] │
         │              [确定]  [取消]               │
         └──────────────────────────────────────────┘
     输入框支持手打路径，也可以点文件夹按钮浏览选择。
     """
     
-    def __init__(self, parent, initial_input: str = ""):
+    def __init__(self, parent, initial_input: str = "", initial_output: str = "",
+                 initial_photo_count: int = 3, initial_video_count: int = 1,
+                 initial_order: str = ORDER_VIDEOS_FIRST):
         """
         参数：
             parent: 父窗口
-            initial_input: 初始预填的输入路径（可选）
+            initial_input/initial_output: 初始预填路径
+            initial_photo_count/initial_video_count/initial_order: 初始拍摄模式
         """
-        self.result = None  # (input_path, output_path) 或 None（取消）
+        self.result = None  # (input_path, output_path, photo_count, video_count, order)
         
         self.window = tk.Toplevel(parent)
-        self.window.title("路径选择")
+        self.window.title("路径与拍摄模式设置")
         self.window.configure(bg='#1E1E1E')
         self.window.resizable(False, False)
         self.window.transient(parent)  # 关联父窗口
@@ -750,7 +809,7 @@ class PathSelectDialog:
         
         # ---- 标题 ----
         tk.Label(
-            self.window, text="请选择照片输入和分类输出路径",
+            self.window, text="请选择路径和相机拍摄模式",
             font=("微软雅黑", 12, "bold"),
             bg='#1E1E1E', fg='#E0E0E0'
         ).pack(pady=(15, 10))
@@ -778,14 +837,54 @@ class PathSelectDialog:
                  ).pack(side=tk.LEFT)
         self.entry_output = tk.Entry(output_row, font=("微软雅黑", 10), width=38)
         self.entry_output.pack(side=tk.LEFT, padx=5, ipady=3)
+        if initial_output:
+            self.entry_output.insert(0, initial_output)
         tk.Button(output_row, text="📁", font=("微软雅黑", 10),
                   bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                   command=lambda: self._browse(self.entry_output)
                   ).pack(side=tk.LEFT, padx=2)
         
+        # ---- 拍摄模式 ----
+        mode_box = tk.LabelFrame(
+            self.window, text=" 相机拍摄模式 ", font=("微软雅黑", 9, "bold"),
+            bg='#1E1E1E', fg='#E0E0E0', padx=10, pady=8
+        )
+        mode_box.pack(fill=tk.X, padx=20, pady=(10, 4))
+
+        mode_row = tk.Frame(mode_box, bg='#1E1E1E')
+        mode_row.pack(fill=tk.X)
+        tk.Label(mode_row, text="你的拍摄模式是", font=("微软雅黑", 9),
+                 bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
+
+        self.entry_photo_count = tk.Entry(mode_row, font=("微软雅黑", 10), width=4,
+                                          justify=tk.CENTER)
+        self.entry_photo_count.pack(side=tk.LEFT, padx=(6, 2), ipady=2)
+        self.entry_photo_count.insert(0, str(initial_photo_count))
+        tk.Label(mode_row, text="张照片 +", font=("微软雅黑", 9),
+                 bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
+
+        self.entry_video_count = tk.Entry(mode_row, font=("微软雅黑", 10), width=4,
+                                          justify=tk.CENTER)
+        self.entry_video_count.pack(side=tk.LEFT, padx=(6, 2), ipady=2)
+        self.entry_video_count.insert(0, str(initial_video_count))
+        tk.Label(mode_row, text="个视频", font=("微软雅黑", 9),
+                 bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
+
+        self.order_var = tk.StringVar(
+            value=ORDER_DISPLAY_NAMES.get(initial_order, ORDER_DISPLAY_NAMES[ORDER_VIDEOS_FIRST])
+        )
+        self.order_combo = ttk.Combobox(
+            mode_row, textvariable=self.order_var,
+            values=[ORDER_DISPLAY_NAMES[ORDER_PHOTOS_FIRST],
+                    ORDER_DISPLAY_NAMES[ORDER_VIDEOS_FIRST]],
+            state='readonly', width=9, font=("微软雅黑", 9)
+        )
+        self.order_combo.pack(side=tk.RIGHT, padx=(8, 0))
+
         # ---- 提示文字 ----
         tk.Label(
-            self.window, text="提示：输出文件夹不存在时会自动创建",
+            self.window,
+            text="提示：只拍照片时把视频数填 0；输出文件夹不存在会自动创建",
             font=("微软雅黑", 8), bg='#1E1E1E', fg='#888888'
         ).pack(pady=(2, 8))
         
@@ -823,9 +922,20 @@ class PathSelectDialog:
             entry.insert(0, folder)
     
     def _on_ok(self):
-        """确定按钮：校验路径并返回结果"""
+        """确定按钮：校验路径和拍摄模式并返回结果"""
         in_path = self.entry_input.get().strip().strip('"')
         out_path = self.entry_output.get().strip().strip('"')
+
+        display_to_order = {display: value for value, display in ORDER_DISPLAY_NAMES.items()}
+        try:
+            photo_count, video_count, media_order = validate_capture_mode(
+                self.entry_photo_count.get().strip(),
+                self.entry_video_count.get().strip(),
+                display_to_order.get(self.order_var.get())
+            )
+        except ValueError as exc:
+            messagebox.showwarning("拍摄模式错误", str(exc), parent=self.window)
+            return
         
         # 输入路径必须存在
         if not in_path:
@@ -853,7 +963,7 @@ class PathSelectDialog:
             )
             return
         
-        self.result = (in_path, out_path)
+        self.result = (in_path, out_path, photo_count, video_count, media_order)
         self.window.destroy()
     
     def _on_cancel(self):
@@ -867,7 +977,7 @@ class FullScreenViewer:
     全分辨率媒体查看器（独立弹窗）。
     
     功能：
-        - 以原始分辨率显示图片/视频帧（不压缩）
+        - 打开时自动适合窗口，图片/视频完整可见
         - 鼠标滚轮缩放（10%~500%）
         - 鼠标拖动平移（放大后）
         - 空格键播放/暂停视频
@@ -878,6 +988,8 @@ class FullScreenViewer:
     MAX_SCALE = 5.0   # 最大缩放500%
     SCALE_STEP = 0.1  # 滚轮每次变化10%
     PLAYBACK_RATES = (0.5, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5, 2.0)
+    PLAYBACK_RATE_LABELS = ('0.5×', '0.75×', '0.8×', '0.9×', '1.0×',
+                            '1.1×', '1.2×', '1.5×', '2×')
     
     def __init__(self, parent, file_path: str, is_video: bool = False):
         """
@@ -957,67 +1069,79 @@ class FullScreenViewer:
         self.v_scroll.config(command=self.canvas.yview)
         
         # ---- 底部控制栏 ----
-        bottom_bar = tk.Frame(self.window, bg='#1A1A1A', height=46)
+        # 视频使用独立的播放行和缩放行，避免进度条/倍速控件被缩放按钮挤掉。
+        bottom_height = 88 if is_video else 46
+        bottom_bar = tk.Frame(self.window, bg='#1A1A1A', height=bottom_height)
         bottom_bar.pack(fill=tk.X, side=tk.BOTTOM)
         bottom_bar.pack_propagate(False)
+
+        if is_video:
+            video_row = tk.Frame(bottom_bar, bg='#242424', height=44)
+            video_row.pack(side=tk.TOP, fill=tk.X)
+            video_row.pack_propagate(False)
+        zoom_row = tk.Frame(bottom_bar, bg='#1A1A1A', height=44)
+        zoom_row.pack(side=tk.BOTTOM, fill=tk.X)
+        zoom_row.pack_propagate(False)
         
         # 缩小按钮
-        btn_zoom_out = tk.Button(bottom_bar, text="🔍− 缩小", font=("微软雅黑", 10),
+        btn_zoom_out = tk.Button(zoom_row, text="🔍− 缩小", font=("微软雅黑", 10),
                                  bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                                  command=lambda: self._zoom(-self.SCALE_STEP), padx=8, pady=3)
         btn_zoom_out.pack(side=tk.LEFT, padx=8, pady=4)
         
         # 放大按钮
-        btn_zoom_in = tk.Button(bottom_bar, text="🔍+ 放大", font=("微软雅黑", 10),
+        btn_zoom_in = tk.Button(zoom_row, text="🔍+ 放大", font=("微软雅黑", 10),
                                 bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                                 command=lambda: self._zoom(self.SCALE_STEP), padx=8, pady=3)
         btn_zoom_in.pack(side=tk.LEFT, padx=2, pady=4)
         
         # 适合窗口按钮
-        btn_fit = tk.Button(bottom_bar, text="📐 适合窗口", font=("微软雅黑", 10),
+        btn_fit = tk.Button(zoom_row, text="📐 适合窗口", font=("微软雅黑", 10),
                             bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                             command=self._fit_to_window, padx=8, pady=3)
         btn_fit.pack(side=tk.LEFT, padx=8, pady=4)
         
         # 100%按钮
-        btn_100 = tk.Button(bottom_bar, text="1:1 原始", font=("微软雅黑", 10),
+        btn_100 = tk.Button(zoom_row, text="1:1 原始", font=("微软雅黑", 10),
                             bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                             command=lambda: self._set_scale(1.0), padx=8, pady=3)
         btn_100.pack(side=tk.LEFT, padx=2, pady=4)
         
         # 播放控制（仅视频）
         if is_video:
-            self.btn_play = tk.Button(bottom_bar, text="⏯ 暂停", font=("微软雅黑", 10),
+            self.btn_play = tk.Button(video_row, text="⏯ 暂停", font=("微软雅黑", 10),
                                       bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                                       command=self._toggle_video, padx=10, pady=3)
-            self.btn_play.pack(side=tk.LEFT, padx=(14, 4), pady=4)
+            self.btn_play.pack(side=tk.LEFT, padx=(8, 5), pady=5)
 
             self.video_time_label = tk.Label(
-                bottom_bar, text="00:00 / 00:00", font=("微软雅黑", 9),
-                bg='#1A1A1A', fg='#CCCCCC', width=15
+                video_row, text="00:00 / 00:00", font=("微软雅黑", 9),
+                bg='#242424', fg='#CCCCCC', width=15
             )
-            self.video_time_label.pack(side=tk.RIGHT, padx=(4, 8), pady=4)
+            self.video_time_label.pack(side=tk.LEFT, padx=(0, 5), pady=5)
+
+            speed_frame = tk.Frame(video_row, bg='#242424')
+            speed_frame.pack(side=tk.RIGHT, padx=(5, 8), pady=4)
+            tk.Label(speed_frame, text="播放速度", font=("微软雅黑", 9),
+                     bg='#242424', fg='#CCCCCC').pack(side=tk.LEFT, padx=(0, 4))
 
             self.speed_var = tk.StringVar(value="1.0×")
             self.speed_combo = ttk.Combobox(
-                bottom_bar,
+                speed_frame,
                 textvariable=self.speed_var,
-                values=[f"{rate:g}×" for rate in self.PLAYBACK_RATES],
+                values=self.PLAYBACK_RATE_LABELS,
                 state='readonly', width=6, font=("微软雅黑", 9)
             )
-            self.speed_combo.pack(side=tk.RIGHT, padx=4, pady=5)
+            self.speed_combo.pack(side=tk.LEFT)
             self.speed_combo.bind('<<ComboboxSelected>>', self._on_speed_changed)
-
-            tk.Label(bottom_bar, text="倍速", font=("微软雅黑", 9),
-                     bg='#1A1A1A', fg='#CCCCCC').pack(side=tk.RIGHT, pady=4)
 
             self.video_progress_var = tk.DoubleVar(value=0.0)
             self.video_progress = ttk.Scale(
-                bottom_bar, from_=0.0, to=1.0,
+                video_row, from_=0.0, to=1.0,
                 variable=self.video_progress_var,
                 command=self._on_seek_preview
             )
-            self.video_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 4), pady=9)
+            self.video_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=11)
             self.video_progress.bind('<ButtonPress-1>', self._on_seek_start)
             self.video_progress.bind('<ButtonRelease-1>', self._on_seek_end)
         
@@ -1036,8 +1160,8 @@ class FullScreenViewer:
             self._load_video()
         else:
             self._load_image()
-        # 始终以1:1（100%）打开；after_idle确保Canvas完成布局后再居中。
-        self.window.after_idle(lambda: self._set_scale(1.0))
+        # 等窗口布局完成后按窗口适配；“1:1 原始”按钮仍可随时查看原始像素。
+        self.window.after(120, self._fit_to_window)
     
     # ==================== 图片加载 ====================
     
@@ -1419,6 +1543,10 @@ class WildCamSorter:
         self.processed_groups = set()     # 已处理组标识集合
         self.class_history = {}           # 分类历史 {rel_path: {species, dest_files}}
         self.progress_file = None         # 进度文件路径
+        self.photo_count = 3             # 每组照片数
+        self.video_count = 1             # 每组视频数
+        self.media_order = ORDER_VIDEOS_FIRST
+        self.group_pattern_mismatches = []
         
         # ===== 视频播放状态 =====
         self.video_cap = None             # cv2.VideoCapture 对象（解码线程内使用）
@@ -1484,9 +1612,9 @@ class WildCamSorter:
         toolbar.grid(row=0, column=0, sticky='ew')
         toolbar.grid_propagate(False)
         
-        # 打开文件夹按钮
+        # 路径与模式按钮
         self.btn_open = tk.Button(
-            toolbar, text="📂 打开文件夹", font=("微软雅黑", 10),
+            toolbar, text="⚙ 路径与模式", font=("微软雅黑", 10),
             bg='#0D7377', fg='white', activebackground='#14919B',
             relief=tk.FLAT, cursor='hand2',
             command=self._prompt_open_folder, padx=12, pady=3
@@ -1515,6 +1643,14 @@ class WildCamSorter:
             bg=COLOR_TOOLBAR, fg='#AAAAAA', anchor=tk.W
         )
         self.label_folder.pack(side=tk.LEFT, padx=10, pady=3, fill=tk.X, expand=True)
+
+        # 当前拍摄模式（右侧常驻显示，方便核对分组设置）
+        self.label_capture_mode = tk.Label(
+            toolbar, text="", font=("微软雅黑", 9),
+            bg=COLOR_TOOLBAR, fg='#80CBC4'
+        )
+        self.label_capture_mode.pack(side=tk.RIGHT, padx=8, pady=3)
+        self._update_capture_mode_label()
         
         # 统计信息（右侧）
         self.label_stats = tk.Label(
@@ -1522,6 +1658,15 @@ class WildCamSorter:
             bg=COLOR_TOOLBAR, fg='#888888'
         )
         self.label_stats.pack(side=tk.RIGHT, padx=12, pady=3)
+
+    def _update_capture_mode_label(self):
+        """在工具栏显示当前拍摄模式。"""
+        if not hasattr(self, 'label_capture_mode'):
+            return
+        order_text = ORDER_DISPLAY_NAMES.get(self.media_order, '未设置')
+        self.label_capture_mode.config(
+            text=f"模式：{self.photo_count}照片 + {self.video_count}视频｜{order_text}"
+        )
     
     # ==================== UI：显示区 ====================
     
@@ -1541,10 +1686,10 @@ class WildCamSorter:
         
         # 创建4个媒体面板
         panel_configs = [
-            (0, 0, 0, "🎬 视频"),      # 左上：视频
-            (0, 1, 1, "📷 截图 ①"),    # 右上：截图1
-            (1, 0, 2, "📷 截图 ②"),    # 左下：截图2
-            (1, 1, 3, "📷 截图 ③"),    # 右下：截图3
+            (0, 0, 0, "媒体 1"),
+            (0, 1, 1, "媒体 2"),
+            (1, 0, 2, "媒体 3"),
+            (1, 1, 3, "媒体 4"),
         ]
         
         for row, col, idx, title in panel_configs:
@@ -1713,8 +1858,13 @@ class WildCamSorter:
         self.label_folder.config(text=f"📁 {self.source_dir}")
         self.label_target.config(text=f"📤 输出到: (未选择)")
         
-        # 扫描文件分组
-        self.groups = scan_and_group_files(self.source_dir)
+        # 按用户设定的拍摄模式扫描分组；末尾不完整组也会完整保留。
+        self.groups = scan_and_group_files(
+            self.source_dir,
+            photo_count=self.photo_count,
+            video_count=self.video_count,
+            media_order=self.media_order
+        )
         
         if not self.groups:
             messagebox.showwarning(
@@ -1728,6 +1878,22 @@ class WildCamSorter:
         
         total_files = sum(len(g) for g in self.groups)
         self.label_stats.config(text=f"共 {len(self.groups)} 组 / {total_files} 个文件")
+        self._update_capture_mode_label()
+
+        self.group_pattern_mismatches = [
+            index for index, group in enumerate(self.groups)
+            if not group_matches_capture_pattern(
+                group, self.photo_count, self.video_count, self.media_order
+            )
+        ]
+        if self.group_pattern_mismatches:
+            mismatch_count = len(self.group_pattern_mismatches)
+            self._log(f"有 {mismatch_count} 组与拍摄模式不完全一致", 'warning')
+            messagebox.showwarning(
+                "拍摄模式核对",
+                f"有 {mismatch_count} 组与当前拍摄模式不完全一致（可能包含最后一个不完整组）。\n\n"
+                "所有文件仍会保留并显示，不会遗漏；如果分组不对，请点击工具栏的“路径与模式”重新设置。"
+            )
         
         # 输出目录尚未确定，等用户选择后由 _finalize_setup 完成剩余初始化
         self.current_group_index = -1
@@ -1762,11 +1928,24 @@ class WildCamSorter:
         弹出路径选择对话框：一个窗口内同时选择输入和输出文件夹。
         确定后完成初始化，取消则保持空状态（可用工具栏按钮随时开始）。
         """
-        dlg = PathSelectDialog(self.root, initial_input=self._pending_input)
+        dlg = PathSelectDialog(
+            self.root,
+            initial_input=self._pending_input or self.source_dir or "",
+            initial_output=self.target_dir or "",
+            initial_photo_count=self.photo_count,
+            initial_video_count=self.video_count,
+            initial_order=self.media_order
+        )
         self.root.wait_window(dlg.window)  # 阻塞直到对话框关闭
         
         if dlg.result:
-            in_path, out_path = dlg.result
+            in_path, out_path, photo_count, video_count, media_order = dlg.result
+            self._stop_video()
+            self.processed_groups = set()
+            self.class_history = {}
+            self.photo_count = photo_count
+            self.video_count = video_count
+            self.media_order = media_order
             self._init_from_source(in_path)
             self.target_dir = out_path
             self.label_target.config(text=f"📤 输出到: {self.target_dir}")
@@ -1776,7 +1955,7 @@ class WildCamSorter:
         else:
             # 用户取消：保持空状态，提示可用工具栏按钮
             self.label_status.config(
-                text="未选择路径，可点工具栏「📂 打开文件夹」随时开始",
+                text="未选择路径，可点工具栏「⚙ 路径与模式」随时开始",
                 fg='#FFB74D'
             )
     
@@ -1793,20 +1972,9 @@ class WildCamSorter:
         self._update_status()
     
     def _prompt_open_folder(self):
-        """弹出输入文件夹选择对话框（切换输入）"""
-        initial = self.source_dir if self.source_dir else os.path.expanduser("~")
-        folder = filedialog.askdirectory(title="选择包含野外相机数据的文件夹", initialdir=initial)
-        if folder:
-            self._stop_video()
-            # 清空旧状态
-            self.processed_groups = set()
-            self.class_history = {}
-            self._init_from_source(folder)
-            # 保留已选的输出目录（如果有），否则要求选择
-            if self.target_dir:
-                self._finalize_setup()
-            else:
-                self.root.after(200, self._prompt_target_folder)
+        """重新打开完整设置页，可同时切换输入/输出路径和拍摄模式。"""
+        self._pending_input = self.source_dir or ""
+        self._show_path_dialog()
     
     def _prompt_target_folder(self):
         """弹出输出文件夹选择对话框（分类结果输出位置）"""
@@ -2003,6 +2171,19 @@ class WildCamSorter:
         return deleted_count
     
     # ==================== 组加载 ====================
+
+    def _media_label_for_index(self, file_index: int) -> str:
+        """按媒体真实类型生成“照片 N / 视频 N”标题。"""
+        if file_index < 0 or file_index >= len(self.current_group_files):
+            return f"媒体 {file_index + 1}"
+        is_video = is_video_file(os.path.basename(self.current_group_files[file_index]))
+        same_type_number = sum(
+            1 for path in self.current_group_files[:file_index + 1]
+            if is_video_file(os.path.basename(path)) == is_video
+        )
+        icon = "🎬" if is_video else "📷"
+        media_name = "视频" if is_video else "照片"
+        return f"{icon} {media_name} {same_type_number}"
     
     def _load_group(self, group_index: int):
         """
@@ -2044,21 +2225,27 @@ class WildCamSorter:
         if is_processed and rel_path in self.class_history:
             prev_species = self.class_history[rel_path].get('species', '')
         
-        # 遍历4个面板位置（超过4个文件的部分不显示但参与分类）
+        # 遍历4个主面板。视频可出现在任意位置；只自动播放第一个视频。
+        video_started = False
         for panel_idx in range(4):
             panel = self._panels[panel_idx]
             
             if panel_idx < len(self.current_group_files):
                 file_path = self.current_group_files[panel_idx]
                 filename = os.path.basename(file_path)
-                
-                if panel_idx == 0 and is_video_file(filename):
+                panel.label_text = self._media_label_for_index(panel_idx)
+
+                if is_video_file(filename) and not video_started:
                     panel.file_path = file_path
-                    panel.title_label.config(text=f"{panel.label_text} | 🎬 {filename}")
+                    panel.title_label.config(text=f"{panel.label_text} | {filename}")
                     self._load_video(file_path, panel)
+                    video_started = True
+                elif is_video_file(filename):
+                    panel.display_video_thumbnail(file_path)
                 else:
                     panel.display_image(file_path)
             else:
+                panel.label_text = f"媒体 {panel_idx + 1}"
                 panel.display_placeholder()
         
         # ---- 溢出文件处理（>4个文件时）----
@@ -2080,13 +2267,23 @@ class WildCamSorter:
             for i in range(n_extra):
                 file_idx = 4 + i
                 file_path = self.current_group_files[file_idx]
-                op = MediaPanel(self.overflow_frame, file_idx, f"📷 截图 {file_idx + 1}")
+                op = MediaPanel(
+                    self.overflow_frame, file_idx, self._media_label_for_index(file_idx)
+                )
                 op.frame.grid(row=0, column=i, sticky='nsew', padx=2, pady=2)
                 op.set_toggle_callback(self._toggle_file_selection)
                 op.set_fullscreen_callback(self._open_fullscreen)
                 op.set_refresh_callback(self._on_panel_refresh)
                 op.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
-                op.display_image(file_path)
+                if is_video_file(os.path.basename(file_path)) and not video_started:
+                    op.file_path = file_path
+                    op.title_label.config(text=f"{op.label_text} | {os.path.basename(file_path)}")
+                    self._load_video(file_path, op)
+                    video_started = True
+                elif is_video_file(os.path.basename(file_path)):
+                    op.display_video_thumbnail(file_path)
+                else:
+                    op.display_image(file_path)
                 op.set_selected(self.selected_flags[file_idx])
                 self.overflow_panels.append(op)
         else:
@@ -2325,7 +2522,7 @@ class WildCamSorter:
         
         panel = getattr(self, 'video_panel', None)
         if panel is None:
-            panel = self._panels[0] if self._panels else None
+            return
         
         if frame_rgb is not None and panel is not None:
             # --- 获取/刷新缓存的面板显示尺寸（每30帧刷新一次）---
@@ -2431,13 +2628,13 @@ class WildCamSorter:
         打开全分辨率查看窗口。
         
         参数：
-            panel_index: 面板索引（0=视频, 1/2/3=截图）
+            panel_index: 文件在当前组中的索引
         """
         if panel_index < 0 or panel_index >= len(self.current_group_files):
             return
         
         file_path = self.current_group_files[panel_index]
-        is_video = (panel_index == 0 and is_video_file(os.path.basename(file_path)))
+        is_video = is_video_file(os.path.basename(file_path))
         
         # 暂停主窗口视频（避免两个窗口同时播放），并记住原来的播放状态。
         was_playing = self.video_playing
@@ -3084,24 +3281,14 @@ class WildCamSorter:
             return
         # 强制刷新视频面板尺寸缓存（下一帧即生效）
         self._cached_video_dims = (0, 0)
-        # 只重新缩放3个静态截图面板（索引1-3）
-        for panel_idx in range(1, min(4, len(self.current_group_files))):
+        # 按真实文件类型重新缩放所有静态图片，不再假设第一个文件一定是视频。
+        for panel_idx in range(0, min(4, len(self.current_group_files))):
             panel = self._panels[panel_idx]
-            if panel.file_path:
-                try:
-                    pil_img = Image.open(panel.file_path)
-                    new_w, new_h = panel._calc_display_size()
-                    if new_w > 0:
-                        pil_resized = pil_img.resize((new_w, new_h), Image.LANCZOS)
-                        photo = ImageTk.PhotoImage(pil_resized)
-                        # 保持引用
-                        if not hasattr(self, '_shot_resize_photos'):
-                            self._shot_resize_photos = [None, None, None]
-                        self._shot_resize_photos[panel_idx - 1] = photo
-                        panel.media_label.config(image=photo, text='')
-                        panel._photo = photo
-                except Exception:
-                    pass
+            if panel.file_path and is_image_file(os.path.basename(panel.file_path)):
+                panel.display_image(panel.file_path)
+        for panel in self.overflow_panels:
+            if panel.file_path and is_image_file(os.path.basename(panel.file_path)):
+                panel.display_image(panel.file_path)
         self._update_progress_bar()
 
 

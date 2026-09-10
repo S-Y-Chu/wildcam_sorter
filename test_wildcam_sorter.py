@@ -5,7 +5,7 @@ import tempfile
 import types
 import unittest
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # 测试CSV和纯逻辑时不需要真正解码视频；CI若未安装OpenCV，提供最小导入替身。
 try:
@@ -28,6 +28,11 @@ class FullScreenViewerTests(unittest.TestCase):
             FullScreenViewer.PLAYBACK_RATES,
             (0.5, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5, 2.0),
         )
+        self.assertEqual(
+            FullScreenViewer.PLAYBACK_RATE_LABELS,
+            ('0.5×', '0.75×', '0.8×', '0.9×', '1.0×',
+             '1.1×', '1.2×', '1.5×', '2×'),
+        )
 
     def test_video_time_format(self):
         self.assertEqual(FullScreenViewer._format_video_time(0), "00:00")
@@ -41,6 +46,108 @@ class FullScreenViewerTests(unittest.TestCase):
         self.assertAlmostEqual(viewer._frame_interval(), 1 / 30)
         viewer._playback_rate = 2.0
         self.assertAlmostEqual(viewer._frame_interval(), 1 / 60)
+
+    def test_fit_to_window_uses_available_canvas_size(self):
+        viewer = FullScreenViewer.__new__(FullScreenViewer)
+        viewer._orig_image = MagicMock()
+        viewer._orig_image.size = (4000, 3000)
+        viewer.canvas = MagicMock()
+        viewer.canvas.winfo_width.return_value = 1200
+        viewer.canvas.winfo_height.return_value = 800
+        viewer._set_scale = MagicMock()
+        viewer._fit_to_window()
+        viewer._set_scale.assert_called_once_with((800 / 3000) * 0.95)
+
+
+class FullscreenDispatchTests(unittest.TestCase):
+    def test_video_in_nonfirst_panel_opens_video_player(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app.current_group_files = ['001.jpg', '002.jpg', '003.jpg', '004.mp4']
+        app.video_playing = False
+        app.root = MagicMock()
+
+        viewer = MagicMock()
+        with patch.object(wildcam_sorter, 'FullScreenViewer', return_value=viewer) as viewer_cls:
+            app._open_fullscreen(3)
+
+        viewer_cls.assert_called_once_with(app.root, '004.mp4', is_video=True)
+        app.root.wait_window.assert_called_once_with(viewer.window)
+
+
+class CaptureModeGroupingTests(unittest.TestCase):
+    def _make_files(self, folder, names):
+        paths = []
+        for name in names:
+            path = os.path.join(folder, name)
+            with open(path, 'wb'):
+                pass
+            paths.append(path)
+        return paths
+
+    def test_video_first_groups_by_configured_counts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            names = [
+                '001.mp4', '002.jpg', '003.jpg', '004.jpg',
+                '005.mp4', '006.jpg', '007.jpg', '008.jpg',
+            ]
+            self._make_files(temp_dir, names)
+            groups = wildcam_sorter.scan_and_group_files(
+                temp_dir, 3, 1, wildcam_sorter.ORDER_VIDEOS_FIRST
+            )
+            self.assertEqual(
+                [[os.path.basename(path) for path in group] for group in groups],
+                [names[:4], names[4:]],
+            )
+            self.assertTrue(all(
+                wildcam_sorter.group_matches_capture_pattern(
+                    group, 3, 1, wildcam_sorter.ORDER_VIDEOS_FIRST
+                ) for group in groups
+            ))
+
+    def test_photos_first_and_every_file_appears_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            names = [
+                '001.jpg', '002.jpg', '003.jpg', '004.mp4',
+                '005.jpg', '006.jpg', '007.jpg', '008.mp4',
+            ]
+            self._make_files(temp_dir, names)
+            groups = wildcam_sorter.scan_and_group_files(
+                temp_dir, 3, 1, wildcam_sorter.ORDER_PHOTOS_FIRST
+            )
+            flattened = [os.path.basename(path) for group in groups for path in group]
+            self.assertEqual(flattened, names)
+            self.assertEqual(len(flattened), len(set(flattened)))
+            self.assertTrue(all(
+                wildcam_sorter.group_matches_capture_pattern(
+                    group, 3, 1, wildcam_sorter.ORDER_PHOTOS_FIRST
+                ) for group in groups
+            ))
+
+    def test_photo_only_mode_keeps_incomplete_last_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            names = [f'{index:03d}.jpg' for index in range(1, 9)]
+            self._make_files(temp_dir, names)
+            groups = wildcam_sorter.scan_and_group_files(
+                temp_dir, 3, 0, wildcam_sorter.ORDER_PHOTOS_FIRST
+            )
+            self.assertEqual([len(group) for group in groups], [3, 3, 2])
+            flattened = [os.path.basename(path) for group in groups for path in group]
+            self.assertEqual(flattened, names)
+            self.assertFalse(wildcam_sorter.group_matches_capture_pattern(
+                groups[-1], 3, 0, wildcam_sorter.ORDER_PHOTOS_FIRST
+            ))
+
+    def test_pattern_validation_detects_wrong_order(self):
+        group = ['001.mp4', '002.jpg', '003.jpg', '004.jpg']
+        self.assertFalse(wildcam_sorter.group_matches_capture_pattern(
+            group, 3, 1, wildcam_sorter.ORDER_PHOTOS_FIRST
+        ))
+
+    def test_capture_mode_rejects_both_counts_zero(self):
+        with self.assertRaises(ValueError):
+            wildcam_sorter.validate_capture_mode(
+                0, 0, wildcam_sorter.ORDER_PHOTOS_FIRST
+            )
 
 
 class CsvRecordTests(unittest.TestCase):
