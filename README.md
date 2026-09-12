@@ -1,4 +1,5 @@
-# WildCam Sorter — 红外相机照片与视频分类器 / Trail-camera Photo & Video Sorter
+# WildCam Sorter — 红外相机照片与视频分类器 
+# Trail-camera Photo & Video Sorter
 
 [中文](#中文说明) · [English](#english-guide) · [下载 / Downloads](https://github.com/S-Y-Chu/wildcam_sorter/releases) · [问题反馈 / Issues](https://github.com/S-Y-Chu/wildcam_sorter/issues)
 
