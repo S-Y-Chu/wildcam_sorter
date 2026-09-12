@@ -140,6 +140,72 @@ def is_media_file(filename: str) -> bool:
     return is_video_file(filename) or is_image_file(filename)
 
 
+def preferred_video_backends(platform_name: str = None) -> list:
+    """返回当前系统适合的视频解码后端，避免调用其他平台专用后端。"""
+    platform_name = platform_name or sys.platform
+    candidates = [getattr(cv2, 'CAP_FFMPEG', None)]
+    if platform_name.startswith('win'):
+        candidates.append(getattr(cv2, 'CAP_DSHOW', None))
+    elif platform_name == 'darwin':
+        candidates.append(getattr(cv2, 'CAP_AVFOUNDATION', None))
+    else:
+        candidates.append(getattr(cv2, 'CAP_GSTREAMER', None))
+    candidates.append(getattr(cv2, 'CAP_ANY', 0))
+
+    # 某些OpenCV构建中CAP_ANY等常量可能与其他后端重复。
+    backends = []
+    for backend in candidates:
+        if backend is not None and backend not in backends:
+            backends.append(backend)
+    return backends
+
+
+def _windows_short_path(file_path: str) -> str:
+    """仅在Windows上取得短路径；macOS/Linux直接返回空字符串。"""
+    if not sys.platform.startswith('win'):
+        return ''
+    try:
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(
+            file_path, buffer, len(buffer)
+        )
+        if 0 < length < len(buffer):
+            return buffer.value
+    except (AttributeError, OSError, ValueError):
+        pass
+    return ''
+
+
+def open_video_capture(video_path: str):
+    """以当前系统支持的OpenCV后端打开视频，失败时返回None。"""
+    for backend in preferred_video_backends():
+        capture = None
+        try:
+            capture = cv2.VideoCapture(video_path, backend)
+            if capture.isOpened():
+                return capture
+        except Exception:
+            pass
+        if capture is not None:
+            try:
+                capture.release()
+            except Exception:
+                pass
+
+    # 中文或超长路径的短路径后备只适用于Windows。
+    short_path = _windows_short_path(video_path)
+    if short_path and short_path != video_path:
+        try:
+            capture = cv2.VideoCapture(short_path)
+            if capture.isOpened():
+                return capture
+            capture.release()
+        except Exception:
+            pass
+    return None
+
+
 class ScanCancelled(Exception):
     """用户取消大目录扫描。"""
 
@@ -1437,8 +1503,8 @@ class FullScreenViewer:
     
     def _load_video(self):
         """加载视频，读取真实帧率/时长，并以1.0倍速开始播放。"""
-        self._video_cap = cv2.VideoCapture(self.file_path)
-        if not self._video_cap.isOpened():
+        self._video_cap = open_video_capture(self.file_path)
+        if self._video_cap is None or not self._video_cap.isOpened():
             self.canvas.create_text(700, 400, text="无法打开视频",
                                     fill='#FF6B6B', font=("微软雅黑", 14))
             if hasattr(self, 'btn_play'):
@@ -2753,26 +2819,8 @@ class WildCamSorter:
         fps = 25
         
         try:
-            # ---- 方案1: OpenCV ----
-            for backend in [cv2.CAP_FFMPEG, cv2.CAP_DSHOW, cv2.CAP_ANY]:
-                try:
-                    c = cv2.VideoCapture(video_path, backend)
-                    if c.isOpened():
-                        cap = c
-                        break
-                    c.release()
-                except Exception:
-                    continue
-            if cap is None or not cap.isOpened():
-                try:
-                    import ctypes
-                    buf = ctypes.create_unicode_buffer(512)
-                    ctypes.windll.kernel32.GetShortPathNameW(video_path, buf, 512)
-                    short_path = buf.value
-                    if short_path and short_path != video_path:
-                        cap = cv2.VideoCapture(short_path)
-                except Exception:
-                    pass
+            # ---- 方案1: OpenCV（按系统选择FFmpeg/DirectShow/AVFoundation） ----
+            cap = open_video_capture(video_path)
             
             # ---- 方案2: PyAV 后备 ----
             if cap is None or not cap.isOpened():

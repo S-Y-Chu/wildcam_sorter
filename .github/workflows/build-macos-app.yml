@@ -1,0 +1,105 @@
+name: Build macOS Apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '1.9'
+    paths:
+      - 'wildcam_sorter.py'
+      - 'requirements.txt'
+      - 'test_wildcam_sorter.py'
+      - 'WildCamSorter-macOS.spec'
+      - 'macOS使用说明.txt'
+      - '.github/workflows/build-macos-app.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.package_arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            machine_arch: arm64
+            package_arch: AppleSilicon
+          - runner: macos-15-intel
+            machine_arch: x86_64
+            package_arch: Intel
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Verify native runner and Tk
+        env:
+          EXPECTED_ARCH: ${{ matrix.machine_arch }}
+        run: |
+          python - <<'PY'
+          import os
+          import platform
+          import tkinter
+
+          actual = platform.machine()
+          expected = os.environ['EXPECTED_ARCH']
+          print(f'Python architecture: {actual}')
+          print(f'Tk version: {tkinter.TkVersion}')
+          if actual != expected:
+              raise SystemExit(f'Expected {expected}, got {actual}')
+          PY
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.10,<7" "pillow>=10,<13" "opencv-python>=4.10,<5" "numpy>=2,<3" "av>=13,<17"
+
+      - name: Run automated tests
+        run: python -m unittest -v
+
+      - name: Build native application bundle
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: pyinstaller --noconfirm --clean WildCamSorter-macOS.spec
+
+      - name: Verify application architecture and signature
+        env:
+          EXPECTED_ARCH: ${{ matrix.machine_arch }}
+        run: |
+          test -d dist/WildCamSorter.app
+          APP_BINARY="dist/WildCamSorter.app/Contents/MacOS/WildCamSorter"
+          file "$APP_BINARY"
+          file "$APP_BINARY" | grep -q "$EXPECTED_ARCH"
+          codesign --verify --deep --strict --verbose=2 dist/WildCamSorter.app
+
+      - name: Create portable ZIP with guide
+        env:
+          PACKAGE_ARCH: ${{ matrix.package_arch }}
+        run: |
+          PACKAGE_NAME="WildCamSorter_macOS_${PACKAGE_ARCH}_v1.9"
+          mkdir "$PACKAGE_NAME"
+          ditto dist/WildCamSorter.app "$PACKAGE_NAME/WildCamSorter.app"
+          cp macOS使用说明.txt "$PACKAGE_NAME/macOS使用说明.txt"
+          ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_NAME" "$PACKAGE_NAME.zip"
+          shasum -a 256 "$PACKAGE_NAME.zip" > "$PACKAGE_NAME.zip.sha256"
+          ls -lh "$PACKAGE_NAME.zip" "$PACKAGE_NAME.zip.sha256"
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: WildCamSorter-macOS-${{ matrix.package_arch }}-v1.9
+          path: |
+            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.9.zip
+            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.9.zip.sha256
+          if-no-files-found: error
+          retention-days: 30

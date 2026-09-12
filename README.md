@@ -8,15 +8,27 @@
 
 ## 安装（0基础）
 
-### 方式一：直接运行（推荐，无需Python）
+### 方式一：Windows 便携版（无需 Python）
 
-1. 把 `dist\WildCamSorter` 文件夹复制到电脑上（U盘/网盘都行）
-2. 双击 `WildCamSorter.exe` 即可运行
-3. **不需要安装Python、不需要装任何东西**
+1. 前往 [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) 下载对应版本的 Windows Portable 压缩包
+2. 完整解压 ZIP，双击 `WildCamSorter.exe`
+3. **不需要安装 Python 或其他运行环境**
 
 > 需要 Windows 10/11 64位系统。
 
-### 方式二：Python运行（开发者）
+### 方式二：macOS 便携版（无需 Python）
+
+1. 点击左上角 `` → **关于本机**，查看“芯片”或“处理器”
+2. Apple M1/M2/M3/M4/M5 等 M 系列电脑下载 `AppleSilicon` 包；Intel 处理器电脑下载 `Intel` 包
+3. 完整解压 ZIP，把 `WildCamSorter.app` 拖入“应用程序”文件夹，或直接放在解压后的文件夹中运行
+4. 第一次打开时，在 Finder 中按住 Control 点击（或右键点击）`WildCamSorter.app` → **打开** → 再次选择 **打开**
+5. 如果仍被系统阻止，前往 **系统设置 → 隐私与安全性**，找到 WildCamSorter 的提示并点击 **仍要打开**
+
+> 建议使用 macOS 13 Ventura 或更高版本。程序未经 Apple 开发者公证，因此第一次打开需要按上面的步骤确认；不要关闭 macOS 的全部安全保护。
+>
+> 每个 Mac 压缩包内都附带 `macOS使用说明.txt`。程序不需要安装 Python。使用外接硬盘作为输出盘时请确保硬盘可写；macOS 通常不能直接写入 NTFS，建议使用 APFS、Mac OS 扩展或 exFAT。
+
+### 方式三：Python运行（开发者）
 
 ```bash
 python -m pip install -r requirements.txt
@@ -272,7 +284,10 @@ A: 程序使用 OpenCV + PyAV 双引擎，覆盖绝大多数格式（MP4/MOV/AVI
 A: 程序按文件名自然排序后，根据你设置的照片数、视频数固定分组。只要排序后的媒体序列符合所选拍摄模式即可。
 
 **Q: 发给别人用，对方没装Python？**  
-A: 把 `dist\WildCamSorter` 文件夹拷过去，双击 `WildCamSorter.exe`。完全绿色免安装。
+A: Windows 下载 Portable ZIP 并运行 `WildCamSorter.exe`；Mac 根据芯片下载 AppleSilicon 或 Intel ZIP，解压后运行 `WildCamSorter.app`。两种系统都不需要安装 Python。
+
+**Q: Mac 第一次打开提示“无法验证开发者”？**
+A: 在 Finder 中右键或按住 Control 点击 `WildCamSorter.app`，选择“打开”并再次确认；如果仍被阻止，到“系统设置 → 隐私与安全性”点击“仍要打开”。
 
 **Q: 物种按钮太多显示不下？**  
 A: 每行最多7个按钮，超出自动换行。
@@ -291,6 +306,8 @@ A: 删了会丢失断点续传记录（所有组恢复"未处理"状态），已
 ## 更新日志
 
 ### v1.9（当前版本）
+- 新增 Apple Silicon 与 Intel 两个原生 macOS 便携包，压缩包内附完整 Mac 安装说明
+- 视频解码会按系统选择 DirectShow、AVFoundation 或 FFmpeg 后端，避免调用错误的平台专用接口
 - 大目录扫描、自然排序、进度读取和已有分类核对移至后台线程，避免界面“未响应”
 - 新增扫描进度窗口、实时文件计数和安全取消按钮
 - 使用 `os.scandir` 减少大批量文件的额外磁盘查询
@@ -348,8 +365,9 @@ A: 删了会丢失断点续传记录（所有组恢复"未处理"状态），已
 - Python 3.11 + tkinter（界面）
 - OpenCV + PyAV（视频播放）
 - Pillow（图像处理 + EXIF读取）
-- PyInstaller（打包为独立exe）
-- 仅支持 Windows 10/11 64位
+- PyInstaller（打包为 Windows EXE 或 macOS APP）
+- 支持 Windows 10/11 64位、Apple Silicon Mac 与 Intel Mac
+- macOS 建议版本：macOS 13 Ventura 或更高
 
 ---
 

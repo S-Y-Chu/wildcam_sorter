@@ -60,6 +60,40 @@ class FullScreenViewerTests(unittest.TestCase):
         viewer._set_scale.assert_called_once_with((800 / 3000) * 0.95)
 
 
+class PlatformCompatibilityTests(unittest.TestCase):
+    def test_macos_uses_avfoundation_without_directshow(self):
+        with patch.multiple(
+            wildcam_sorter.cv2,
+            CAP_FFMPEG=1900,
+            CAP_DSHOW=700,
+            CAP_AVFOUNDATION=1200,
+            CAP_GSTREAMER=1800,
+            CAP_ANY=0,
+            create=True,
+        ):
+            backends = wildcam_sorter.preferred_video_backends('darwin')
+        self.assertEqual(backends, [1900, 1200, 0])
+        self.assertNotIn(700, backends)
+
+    def test_windows_uses_directshow_without_avfoundation(self):
+        with patch.multiple(
+            wildcam_sorter.cv2,
+            CAP_FFMPEG=1900,
+            CAP_DSHOW=700,
+            CAP_AVFOUNDATION=1200,
+            CAP_GSTREAMER=1800,
+            CAP_ANY=0,
+            create=True,
+        ):
+            backends = wildcam_sorter.preferred_video_backends('win32')
+        self.assertEqual(backends, [1900, 700, 0])
+        self.assertNotIn(1200, backends)
+
+    def test_windows_short_path_is_never_called_on_macos(self):
+        with patch.object(wildcam_sorter.sys, 'platform', 'darwin'):
+            self.assertEqual(wildcam_sorter._windows_short_path('/tmp/测试.mp4'), '')
+
+
 class FullscreenDispatchTests(unittest.TestCase):
     def test_video_in_nonfirst_panel_opens_video_player(self):
         app = WildCamSorter.__new__(WildCamSorter)
