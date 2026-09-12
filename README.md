@@ -4,7 +4,20 @@
 
 ## 下载与使用
 
-没有 Python 环境的 Windows 用户，请前往 [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) 下载对应版本的 Portable 压缩包。完整解压后运行 `WildCamSorter.exe`。
+### Windows 10/11 64 位
+
+前往 [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) 下载对应版本的 Windows Portable 压缩包。完整解压后运行 `WildCamSorter.exe`，不需要安装 Python。
+
+### macOS
+
+在左上角 `` → **关于本机**中查看电脑芯片，然后在 Release **WildCam Sorter v1.9（Mac）**中选择对应的压缩包：
+
+- Apple M1/M2/M3/M4/M5 等 M 系列芯片：下载 `AppleSilicon` 包
+- Intel 处理器：下载 `Intel` 包
+
+完整解压后运行 `WildCamSorter.app`，不需要安装 Python。第一次打开时，请在 Finder 中按住 Control 点击（或右键点击）程序，选择 **打开** 并再次确认；如果仍被阻止，到 **系统设置 → 隐私与安全性**点击 **仍要打开**。建议使用 macOS 13 Ventura 或更高版本。
+
+Mac 压缩包内附有完整的 `macOS使用说明.txt`。使用外接硬盘保存分类结果时请确保硬盘可写；macOS 通常不能直接写入 NTFS，建议使用 APFS、Mac OS 扩展或 exFAT。
 
 需要阅读或修改源码时，请切换到对应版本分支。
 
@@ -28,6 +41,7 @@
 - 启动设置页可指定照片数、视频数及二者先后顺序。
 - 图片默认适应窗口显示；视频提供播放/暂停、可拖动进度条与 9 档倍速。
 - CSV 按照片和视频逐文件记录，包含文件名列；重新分类时更新原记录。
+- 提供 Apple Silicon 与 Intel 两个原生 macOS 便携包。
 
 ## 仓库结构
 
