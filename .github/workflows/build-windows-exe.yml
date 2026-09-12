@@ -1,9 +1,6 @@
 name: Build Windows EXE
 
 on:
-  push:
-    branches:
-      - 'codex/v1.10-portable-preview'
   workflow_dispatch:
 
 permissions:

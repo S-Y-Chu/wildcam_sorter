@@ -2,17 +2,6 @@ name: Build macOS Apps
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - 'codex/v1.10-portable-preview'
-    paths:
-      - 'wildcam_sorter.py'
-      - 'requirements.txt'
-      - 'test_wildcam_sorter.py'
-      - 'WildCamSorter-macOS.spec'
-      - 'macOS使用说明.txt'
-      - 'README.md'
-      - '.github/workflows/build-macos-app.yml'
 
 permissions:
   contents: read
