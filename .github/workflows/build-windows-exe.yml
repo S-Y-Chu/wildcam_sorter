@@ -3,7 +3,7 @@ name: Build Windows EXE
 on:
   push:
     branches:
-      - codex/windows-exe
+      - 'codex/v1.10-portable-preview'
   workflow_dispatch:
 
 permissions:
@@ -45,12 +45,22 @@ jobs:
           Get-Item "dist/WildCamSorter.exe" | Format-List Name, Length, LastWriteTime
           (Get-FileHash "dist/WildCamSorter.exe" -Algorithm SHA256).Hash | Set-Content "dist/WildCamSorter.exe.sha256"
 
+      - name: Create portable ZIP with README
+        shell: pwsh
+        run: |
+          $package = "WildCamSorter_Windows_v1.10"
+          New-Item -ItemType Directory -Path $package | Out-Null
+          Copy-Item "dist/WildCamSorter.exe" "$package/WildCamSorter.exe"
+          Copy-Item "README.md" "$package/README.md"
+          Compress-Archive -Path $package -DestinationPath "$package.zip"
+          (Get-FileHash "$package.zip" -Algorithm SHA256).Hash | Set-Content "$package.zip.sha256"
+
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: WildCamSorter-Windows
+          name: WildCamSorter-Windows-v1.10
           path: |
-            dist/WildCamSorter.exe
-            dist/WildCamSorter.exe.sha256
+            WildCamSorter_Windows_v1.10.zip
+            WildCamSorter_Windows_v1.10.zip.sha256
           if-no-files-found: error
           retention-days: 30

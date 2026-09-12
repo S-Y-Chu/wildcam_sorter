@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - '1.9'
+      - 'codex/v1.10-portable-preview'
     paths:
       - 'wildcam_sorter.py'
       - 'requirements.txt'
       - 'test_wildcam_sorter.py'
       - 'WildCamSorter-macOS.spec'
       - 'macOS使用说明.txt'
+      - 'README.md'
       - '.github/workflows/build-macos-app.yml'
 
 permissions:
@@ -86,10 +87,11 @@ jobs:
         env:
           PACKAGE_ARCH: ${{ matrix.package_arch }}
         run: |
-          PACKAGE_NAME="WildCamSorter_macOS_${PACKAGE_ARCH}_v1.9"
+          PACKAGE_NAME="WildCamSorter_macOS_${PACKAGE_ARCH}_v1.10"
           mkdir "$PACKAGE_NAME"
           ditto dist/WildCamSorter.app "$PACKAGE_NAME/WildCamSorter.app"
           cp macOS使用说明.txt "$PACKAGE_NAME/macOS使用说明.txt"
+          cp README.md "$PACKAGE_NAME/README.md"
           ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_NAME" "$PACKAGE_NAME.zip"
           shasum -a 256 "$PACKAGE_NAME.zip" > "$PACKAGE_NAME.zip.sha256"
           ls -lh "$PACKAGE_NAME.zip" "$PACKAGE_NAME.zip.sha256"
@@ -97,9 +99,9 @@ jobs:
       - name: Upload macOS package
         uses: actions/upload-artifact@v4
         with:
-          name: WildCamSorter-macOS-${{ matrix.package_arch }}-v1.9
+          name: WildCamSorter-macOS-${{ matrix.package_arch }}-v1.10
           path: |
-            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.9.zip
-            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.9.zip.sha256
+            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.10.zip
+            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.10.zip.sha256
           if-no-files-found: error
           retention-days: 30
