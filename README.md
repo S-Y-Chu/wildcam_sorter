@@ -10,7 +10,7 @@
 
 ### macOS
 
-在左上角 `` → **关于本机**中查看电脑芯片，然后在 Release **WildCam Sorter v1.10** 中选择对应的压缩包：
+在左上角 `` → **关于本机**中查看电脑芯片，然后在 [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) **WildCam Sorter v1.10** 中选择对应的压缩包：
 
 - Apple M1/M2/M3/M4/M5 等 M 系列芯片：下载 `WildCamSorter_macOS_AppleSilicon_v1.10_Portable.zip`
 - Intel 处理器：下载 `WildCamSorter_macOS_Intel_v1.10_Portable.zip`
