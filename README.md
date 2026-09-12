@@ -6,14 +6,14 @@
 
 ### Windows 10/11 64 位
 
-前往 [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) 下载对应版本的 Windows Portable 压缩包。完整解压后运行 `WildCamSorter.exe`，不需要安装 Python。
+前往 [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) 下载最新版本的 Windows Portable 压缩包。完整解压后运行 `WildCamSorter.exe`，不需要安装 Python。
 
 ### macOS
 
-在左上角 `` → **关于本机**中查看电脑芯片，然后在 Release **WildCam Sorter v1.9（Mac）**中选择对应的压缩包：
+在左上角 `` → **关于本机**中查看电脑芯片，然后在 Release **WildCam Sorter v1.10** 中选择对应的压缩包：
 
-- Apple M1/M2/M3/M4/M5 等 M 系列芯片：下载 `AppleSilicon` 包
-- Intel 处理器：下载 `Intel` 包
+- Apple M1/M2/M3/M4/M5 等 M 系列芯片：下载 `WildCamSorter_macOS_AppleSilicon_v1.10_Portable.zip`
+- Intel 处理器：下载 `WildCamSorter_macOS_Intel_v1.10_Portable.zip`
 
 完整解压后运行 `WildCamSorter.app`，不需要安装 Python。第一次打开时，请在 Finder 中按住 Control 点击（或右键点击）程序，选择 **打开** 并再次确认；如果仍被阻止，到 **系统设置 → 隐私与安全性**点击 **仍要打开**。建议使用 macOS 13 Ventura 或更高版本。
 
@@ -32,16 +32,17 @@ Mac 压缩包内附有完整的 `macOS使用说明.txt`。使用外接硬盘保�
 | 1.7 | [1.7](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.7) | 媒体查看器、CSV 逐文件记录与 Windows 便携版 |
 | 1.8 | [1.8](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.8) | 自定义拍摄模式、视频进度条和多档倍速 |
 | 1.9 | [1.9](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.9) | 超大目录后台处理、低内存优化与“跳转至”功能 |
+| 1.10 | [1.10](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10) | 查看器缩放拖动、多范围拍摄模式、快速连续分类、双进度条与主题设置 |
 
-## 最新版本：1.9
+## 最新版本：1.10
 
-- 扫描、排序、进度读取和已有分类核对均在后台执行，扫描过程可取消。
-- 采用轻量文件分组，避免一次性加载全部媒体内容。
-- 支持按照片或视频序号、完整文件名跳转到所在组。
-- 启动设置页可指定照片数、视频数及二者先后顺序。
-- 图片默认适应窗口显示；视频提供播放/暂停、可拖动进度条与 9 档倍速。
-- CSV 按照片和视频逐文件记录，包含文件名列；重新分类时更新原记录。
-- 提供 Apple Silicon 与 Intel 两个原生 macOS 便携包。
+- 图片查看器支持以鼠标指针为中心在 100%–1000% 间缩放，并可按住图片自由拖动。
+- 支持多个序号范围使用不同拍摄模式，并可限定本次只查看/分类的文件范围。
+- 分类后的复制、EXIF 读取和 CSV 写入改为后台按顺序处理，支持更流畅的连续分类。
+- 增加文件夹总进度与本次选中范围进度两条进度条。
+- 增加白色、黑色和跟随系统主题，以及教程、关于和联系作者入口。
+- 可自动识别输出目录中人工分好的文件并补写 CSV 记录。
+- Release 同时提供 Windows x64、macOS Apple Silicon 和 macOS Intel 三个 Portable 包。
 
 ## 仓库结构
 
