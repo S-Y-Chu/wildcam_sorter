@@ -1,338 +1,189 @@
-# WildCam Sorter — 野外相机数据分类工具
+# WildCam Sorter v1.7 — 红外相机照片与视频分类器 / Trail-camera Photo & Video Sorter
 
-## 一句话说明
-
-帮你把野外相机拍的照片和视频，**按物种快速分类整理**。全程鼠标操作，几分钟能分完几百组数据。
+[中文](#中文说明) · [English](#english-guide) · [下载 / Downloads](https://github.com/S-Y-Chu/wildcam_sorter/releases) · [最新版源码 / Latest source](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10)
 
 ---
 
-## 安装（0基础）
+## 中文说明
 
-### 方式一：直接运行（推荐，无需Python）
+> 这是历史版本 **v1.7** 的说明。一般用户请优先下载 [最新版本 v1.10](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.10)。
 
-1. 把 `dist\WildCamSorter` 文件夹复制到电脑上（U盘/网盘都行）
-2. 双击 `WildCamSorter.exe` 即可运行
-3. **不需要安装Python、不需要装任何东西**
+### 简介
 
-> 需要 Windows 10/11 64位系统。
+修复媒体查看与视频播放，并把 CSV 改为包含文件名、每个媒体文件独立一行。
 
-### 方式二：Python运行（开发者）
+WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。它按组预览照片和视频，把选中的文件复制到物种类别目录，并保存进度和 CSV。原始输入文件不会被移动或改写。
+
+### 本版本主要功能
+
+- 独立查看器以 100%（1:1 原始大小）打开。
+- 视频默认 1.0 倍速，提供播放/暂停、可拖动进度条和九档倍速。
+- CSV 增加文件名列，同组视频和照片分别写入。
+- 重新分类会更新旧行，避免重复记录。
+
+### 安装与运行
+
+#### Windows 10/11 64 位
+
+1. 前往 [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) 下载与本版本对应的 Windows Portable 压缩包（如有）。
+2. **完整解压** ZIP；不要直接在压缩包预览窗口中运行。
+3. 双击 `WildCamSorter.exe`。便携版不需要安装 Python。
+
+#### 从源码运行（开发者）
 
 ```bash
-conda activate wildcam
+python -m pip install -r requirements.txt
 python wildcam_sorter.py
-# 或指定输入文件夹（启动时预填输入框，仍会弹出对话框选择输出）
-python wildcam_sorter.py "D:\DCIM\100_L59"
 ```
 
-> 无论是否传路径，启动后都会弹出**输入/输出路径选择对话框**。
-> 命令行传的路径只是自动填入"照片输入路径"一栏，输出路径仍需手动选择。
 
----
+### 数据与分组规则
 
-## 数据要求
+按文件名自然排序并自动寻找视频；每个视频与下一个视频之前的照片组成一组。
 
-文件夹里按文件名排序后，程序**自动识别视频和截图**的关系：
+支持的常见图片格式包括 JPG、JPEG、PNG、BMP；常见视频格式包括 AVI、MP4、MOV、MKV、WMV。实际视频兼容性取决于文件编码和系统解码能力。
 
-```
-D:\DCIM\100_L59\
-    ├── 111.MOV        ← 视频
-    ├── 112.JPG        ← 属于111的截图
-    ├── 113.JPG
-    ├── 114.JPG
-    ├── 115.JPG
-    ├── 116.AVI        ← 下一个视频
-    ├── 117.JPG        ← 属于116的截图
-    └── ...
-```
+### 基本使用
 
-- 两个视频之间的所有照片自动归给前一个视频
-- **截图数量不固定**（1视频+N张截图都可以）
-- 支持的视频：AVI、MP4、MOV、MKV、WMV 等
-- 支持的图片：JPG、JPEG、PNG、BMP 等
+1. 启动程序，分别选择红外相机数据的输入文件夹和分类结果的输出文件夹。
+2. 核对当前组中的照片和视频；不需要参与全局分类的文件可取消选中或单独指定类别。
+3. 点击“空拍”、已有物种或“新物种”。多类别模式可为同一媒体选择多个类别。
+4. 程序复制文件并保存进度，然后进入下一组。可返回上一组重新分类。
 
----
+> 输入目录是原始数据；输出目录是分类结果。请勿把二者理解反，也不建议将输出目录设在输入目录内部。
 
-## 界面说明
+### 媒体查看器
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ 📂打开文件夹  📤输出到  📁 D:\DCIM\100_L59   📤输出到: D:\DCIM │ ← 工具栏
-├────────────────────────┬─────────────────────────────────────┤
-│   🎬 视频   [✓已选]     │   📷 截图①  [✓已选]                 │
-│                        │                                     │
-├────────────────────────┼─────────────────────────────────────┤
-│   📷 截图②  [✓已选]     │   📷 截图③  [✓已选]                 │
-├────────────────────────┴─────────────────────────────────────┤
-│ [🟦空拍] [牛] [马] [📋多类别] [🟧新物种]  已选4/4  ◀ ▶ ⏭     │ ← 操作区
-├──────────────────────────────────────────────────────────────┤
-│ ██████████░░░░░░░░░░░░  已处理 12/50 组                      │ ← 状态栏
-└──────────────────────────────────────────────────────────────┘
+视频以原始 FPS、默认 1.0× 播放。倍速可选 0.5×、0.75×、0.8×、0.9×、1.0×、1.1×、1.2×、1.5×、2×，并可拖动进度条。
+
+### CSV、进度与日志
+
+列为：文件名、经度、纬度、海拔、物种、拍摄时间、点位名称。每个文件独立一行，多类别写在同一行。
+
+- `wildcam_records.csv`：分类记录，UTF-8 编码。
+- `.wildcam_progress.json`：断点续传数据；删除后会丢失软件保存的处理进度。
+- `wildcam_sorter.log`：操作和错误日志；遇到问题时可连同复现步骤发给作者。
+
+### 输出示例
+
+```text
+输出目录/
+├── 空拍/
+├── 牛/
+├── 马/
+├── wildcam_records.csv
+├── .wildcam_progress.json
+└── wildcam_sorter.log
 ```
 
-- 上方4个大框：左上角是视频（自动循环播放），其余是截图
-- **点击任意画面** → 弹出全分辨率查看窗口
-- 每组超过4个文件时，下方自动出现**溢出文件行**显示剩余文件
-- 底部进度条显示已处理比例
+分类操作以复制为主，原始照片和视频保留在输入目录。重新分类时，程序会调整先前由本软件生成的分类结果。
+
+### 常见问题
+
+**视频无法播放怎么办？** 先确认文件在系统播放器中能正常播放，再查看 `wildcam_sorter.log`。MOV/MP4 是容器格式，同一扩展名可能使用不同编码。
+
+**关闭后能继续吗？** 可以。再次使用相同的输入与输出目录，程序会读取进度并跳过已处理内容。
+
+**没有 Python 能用吗？** 可以。下载对应系统的 Portable 包，完整解压后运行即可。
+
+**可以直接在 ZIP 里运行吗？** 不建议。必须先完整解压，否则依赖文件可能找不到，进度与日志也可能无法正常保存。
+
+### 技术信息
+
+- Python、tkinter、Pillow、OpenCV
+- 打包：PyInstaller
+- 源码分支：[v1.7](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.7)
+- 作者：Siyuan ZHU
 
 ---
 
-## 三步上手（纯鼠标操作）
+## English Guide
 
-### 第1步：启动程序，选择输入和输出文件夹
+> This document describes historical release **v1.7**. Most users should download the [latest release, v1.10](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.10).
 
-启动程序后**自动弹出**路径选择对话框：
+### Overview
 
-```
-┌──────────────────────────────────────────────────┐
-│          请选择照片输入和分类输出路径               │
-│  照片输入路径  [ D:\DCIM\100_L59      ] [📁]      │
-│  照片输出路径  [ E:\分类结果          ] [📁]      │
-│              [ 确定 ]    [ 取消 ]                 │
-└──────────────────────────────────────────────────┘
-```
+Fixes media viewing and video playback, and changes CSV output to include filenames with one row per media file.
 
-1. **输入路径** = 野外相机数据所在文件夹（可手打路径或点 📁 浏览）
-2. **输出路径** = 分类结果存放位置（不存在会自动创建）
-3. 点 **确定** → 程序自动扫描，跳到第一个未处理的组
+WildCam Sorter is a local desktop tool for classifying trail-camera photos and videos. It previews media in groups, copies selected files into species folders, and records progress and CSV data. Original input files are never moved or modified.
 
-> 中途想换文件夹：工具栏的 **📂 打开文件夹**（换输入）和 **📤 输出到**（换输出）。
-> 如果之前分过一部分，会自动跳过已处理的组（断点续传）。
-> 如果你手动分过照片到子文件夹，程序也会自动识别并跳过。
+### Highlights in this release
 
-### 第2步：看 & 选
+- The standalone viewer opens at 100% (native 1:1 size).
+- Video defaults to 1.0× and provides play/pause, a seek bar, and nine playback speeds.
+- CSV adds a filename column and writes videos and photos in the same group separately.
+- Reclassification updates existing rows instead of duplicating them.
 
-- 视频自动播放，点画面可弹出**全分辨率查看器**：默认以1:1原始大小打开，并提供播放/暂停、可拖动进度条和0.5×～2×倍速选择
-- 默认全部文件选中（绿色 `✓已选` 按钮）
-- 点右上角 `✓已选` 按钮 → 变成红色 `✗取消`，该文件不参与全局分类
-- 点 **◀ 上一组** / **下一组 ▶** 翻组
-- 点 **⏭ 跳至未处理** 快速跳到第一个没分的组
+### Installation and launch
 
-### 第3步：分类
+#### Windows 10/11 64-bit
 
-| 判断 | 怎么操作 |
-|------|----------|
-| 啥也没拍到 | 点 **🟦 空拍** |
-| 拍到一种动物 | 点对应的物种按钮（如 **牛**） |
-| 拍到新物种 | 点 **🟧 新物种** → 输入名称（如"马"） |
-| 一张照片有多个物种 | 用 **📋 多类别**（见下） |
-| 某个文件要去别的类别 | 取消该文件的 `✓已选`，用框内迷你按钮（见下） |
+1. Open [Releases](https://github.com/S-Y-Chu/wildcam_sorter/releases) and download the Windows Portable archive matching this version, when available.
+2. **Extract the ZIP completely**; do not run the app from inside the archive preview.
+3. Double-click `WildCamSorter.exe`. The portable build does not require Python.
 
-分完自动进入下一组。
+#### Run from source (developers)
 
----
-
-## 多类别分类
-
-当一张照片里有**多种动物**（如牧羊人+羊+牛）：
-
-1. 点 **📋 多类别** → 按钮变成 **✅ 完成分类**
-2. 依次点击 **羊**、**牛** → 选中按钮变橙色
-3. 点 **🟧 新物种** → 输入"人" → 自动加入选中
-4. 点 **✅ 完成分类** → 照片同时复制到 羊/牛/人 三个文件夹；CSV仍只写该文件的一行，物种名记为“人；牛；羊”
-5. 自动进入下一组，多类别模式自动关闭
-
----
-
-## 每文件独立分类
-
-想让组里的不同文件去不同类别时（如视频和截图1-2是牛、截图3空拍）：
-
-1. 点截图3的 `✓已选` → 变 `✗取消`，**该框底部出现迷你按钮栏**：
-
-```
-┌─────────────────┐
-│     📷 截图      │
-│  牛  马  野猪  📋🔄 │ ← 迷你按钮栏（只影响这个文件）
-│ PICT0002.JPG    │
-│      [✗取消]     │
-└─────────────────┘
+```bash
+python -m pip install -r requirements.txt
+python wildcam_sorter.py
 ```
 
-2. 在迷你栏里点 **牛** → 该文件单独归入牛
-3. 迷你栏 **📋** → 该文件多选模式（可选多个物种）
-4. 迷你栏 **🔄** → 刷新物种列表（新物种出现后点这个）
-5. 最后点全局操作区的分类按钮提交：
-   - 选中的文件 → 按全局分类
-   - 取消的文件 → 按各自的迷你选择分类（没选的 → 空拍）
 
----
-## Example
+### Data and grouping rules
 
-1.现在有一组视频和图片数据，视频里**什么都没有**，同样的四个照片也是什么都没拍到。
-点击“**空拍**”即可。
+Files are naturally sorted and videos are detected automatically; each video is grouped with the photos before the next video.
 
-2.视频里出现了牛，四个照片都拍到了牛。
-点击“**牛**”即可，如果没有分过牛的话就会没有这个按键，此时点击“**新类别**”，输入“牛”后确认即可，之后的分类中，下面会自动多出“牛”这个按钮。
+Common image formats include JPG, JPEG, PNG, and BMP. Common video formats include AVI, MP4, MOV, MKV, and WMV. Actual video compatibility depends on the codec and the system decoder.
 
-3.视频里出现了牛，但是牛在视频最后走出了画面，导致三张截图里，前两张有牛，最后一张没有牛，属于空拍。
-点击最后一张照片上的“**已选择**”按钮，然后取消这张照片的选择（进行反选操作），之后点击主操作区的“牛”。已选择的视频和照片会进入“牛”，而被取消选择的照片（**且没有划分为其他类别的**（这个功能在下面阐述）照片）**自动进入“空拍”这个类别，无需点击下面的针对于单张照片/视频的迷你分类按钮**。
+### Quick start
 
-4.视频里出现了牛和马，三张照片都拍到了两种动物。
-点击主操作区的“多类别”按钮，点击“牛”和“马”（如果没有“马”这个类别就点击“**新类别**”，操作和上述建立新类别相同），之后点击“**完成分类**”。这一组就会结束分类，然后加载下一组照片。
-对于更多的类别，比如视频和照片出现了四种五种动物，操作都是一样的。
+1. Launch the app and choose the trail-camera input folder and classification output folder separately.
+2. Review the photos and videos in the current group. Exclude files from the group action or assign an individual category when needed.
+3. Choose Empty, an existing species, or New Species. Multi-category mode can assign the same media to several categories.
+4. The app copies files, saves progress, and advances to the next group. Return to a previous group to correct a classification.
 
-5.视频里出现了牛、马还有羊，视频有**五张**截图——**第一张照片只有马，第二张照片只有牛，第三张照片有牛也有马，第四张三种动物都在，第五张图拍的不好，拍最后一张照片的时候，这些动物全跑出画面了，什么都没拍到**。这种非常复杂的情况虽然少见，但是也可能存在，该怎么分？
-操作方法：点击“多类别”，先选择牛和马、羊（如果要创建新类别操作同上），把视频和第四张照片正常分出去，然后反选剩下的特殊的照片。
-**反选照片会出现针对于这一张照片/视频的分类按钮**，反选第一张照片之后点击“马”，反选第二张照片后点击“牛”，反选第三张照片之后，由于这个照片既有牛也有马，就要点击迷你按钮里的“**多类别**”按钮，然后点击“牛”和“马”，这样就可以对这张三个动物出现俩的照片挂上“牛”和“马”的标签。第五张照片反选就行，**不用操作，自动进入空拍**。
+> The input folder contains original data; the output folder contains classified copies. Do not swap them, and avoid placing the output folder inside the input folder.
 
-Zhu：各位使用者可能明白我的思路了，红外相机拍视频的时候会附带着拍几张照片。其中视频总是完整的，但是照片鬼知道会截到哪一个瞬间，因此我们以分视频为主。所以，这个软件主界面里，显示框下面的主操作区作为主控制台，使用的时候主要针对视频的分类，而照片作为视频的附属物在大多数情况下和视频是一致的，因此点击主控制台的分类按钮时，把视频和选中的照片一起分走了。如果出现了特殊情况，需要把某些特定的图片分走，就点击“已选择”按钮取消选择。反选后出现的，针对每一个展示框里单张照片的迷你分类按钮，它的作用是对每个照片打上独特的标签，比如上面的例5，把第三种情况下，那个出现了两种动物的照片挂上“牛”和“马”的标签，以此实现分类。
-按一下下面的按钮，就完成了这个组视频加照片的分类，而按针对每个照片的迷你分类按钮，只是对单张照片分类，**因此打标签的操作优先级要低于主操作区按钮的分类**（这就是我写整个分类系统的逻辑）。所以如果遇到了复杂的情况，要**先给每个照片分类加标签，再点下面的主操作区按钮**。
+### Media viewer
 
----
+Video plays at its source FPS and defaults to 1.0×. Available speeds are 0.5×, 0.75×, 0.8×, 0.9×, 1.0×, 1.1×, 1.2×, 1.5×, and 2×, with a draggable seek bar.
 
-## 自动识别已分照片
+### CSV, progress, and logs
 
-如果你已经手动分了一部分照片（比如放到 `牛\`、`羊\` 文件夹里），程序启动时自动检测：
-- 输出目录中已有的文件 → 对应源组自动标记为"已处理"并跳过
-- 状态栏显示：`🔍 检测到 N 组已手动分好，自动跳过`
+Columns are filename, longitude, latitude, altitude, species, capture time, and site name. Every file has its own row; multiple categories share that row.
 
----
+- `wildcam_records.csv`: UTF-8 classification records.
+- `.wildcam_progress.json`: resume data; deleting it removes the progress known to the app.
+- `wildcam_sorter.log`: operations and error log; send it to the author together with reproduction steps when reporting a problem.
 
+### Example output
 
-## 断点续传
-
-分了80组后关闭程序，下次打开**同一个文件夹**时自动跳过已处理的80组，从第81组开始。
-
-进度保存在输出目录的 `.wildcam_progress.json`（**不要删除**）。
-
----
-
-## 改错（撤销重分）
-
-1. 点 **◀ 上一组** 退回分错的组
-2. 直接点正确的分类按钮
-3. 程序自动**删除之前错放的文件**，重新复制
-
----
-
-## CSV自动记录
-
-每次分类自动写入 `wildcam_records.csv`（输出目录下）：
-
-| 文件名 | 经度 | 纬度 | 海拔(m) | 物种 | 拍摄时间 | 点位名称 |
-|--------|------|------|---------|------|----------|----------|
-| 001.mp4 | 103.500 | 30.264 | 450.5 | 牛 | 2024-06-15 14:30 | 100_L59 |
-| 002.jpg | 103.500 | 30.264 | 450.5 | 牛 | 2024-06-15 14:30 | 100_L59 |
-| 003.jpg | 103.500 | 30.264 | 450.5 | 牛 | 2024-06-15 14:30 | 100_L59 |
-
-- GPS坐标、海拔、拍摄时间从照片EXIF自动提取（没有GPS的设备对应格留空）
-- **每个文件一行**：同组的视频和所有照片都会分别写入，不再以整组汇总成一行
-- **空拍同样记录**：物种名写"空拍"，经纬度、海拔、时间照常记录，格式不变
-- 重新分类同一组时会更新对应文件的原记录，不会重复追加；首次遇到旧版CSV时会自动备份旧表后建立新版表
-- 点位名称 = 源文件夹名
-- UTF-8编码，Excel双击即开
-
----
-
-## 日志记录
-
-所有操作自动记录到 `wildcam_sorter.log`（输出目录下）：
-- 时间戳、打开文件夹、分类详情、错误堆栈
-- 单文件最大5MB，自动轮转（保留3个备份）
-- 出bug时把日志发给开发者即可快速定位
-
----
-
-## 文件去向
-
-输出目录 = 启动时选择的**照片输出路径**（可任选，比如另一个硬盘）。
-
-举例（输入 `D:\DCIM\100_L59`，输出 `E:\分类结果`）：
-
-```
-E:\分类结果\
-    ├── 空拍\                     ← 分类结果
-    ├── 牛\
-    ├── 马\
-    ├── wildcam_records.csv       ← 分类记录表
-    ├── wildcam_sorter.log        ← 运行日志
-    └── .wildcam_progress.json    ← 进度文件（自动生成）
-
-D:\DCIM\
-    └── 100_L59\                  ← 原始数据（只读，不会动）
+```text
+Output folder/
+├── Empty/
+├── Cattle/
+├── Horse/
+├── wildcam_records.csv
+├── .wildcam_progress.json
+└── wildcam_sorter.log
 ```
 
-> **所有操作都是复制，原始文件永远不会被修改或移动。**
+Sorting primarily copies files, so original photos and videos remain in the input folder. Reclassification adjusts results previously created by this app.
 
----
+### FAQ
 
-## 常见问题
+**A video does not play. What should I do?** First check that it plays in a system media player, then inspect `wildcam_sorter.log`. MOV and MP4 are containers, so files with the same extension may use different codecs.
 
-**Q: 视频播放不了？**  
-A: 程序使用 opencv + imageio-ffmpeg 双引擎，覆盖绝大多数格式（MP4/MOV/AVI）。仍不行请把日志发给开发者。
+**Can I resume after closing the app?** Yes. Reopen the same input and output folders; the app reads its progress and skips processed content.
 
-**Q: 我的文件命名不规则？**  
-A: 程序按文件名自然排序后自动识别视频来分组。确保文件名排序后视频和照片的先后顺序正确即可。
+**Can someone without Python use it?** Yes. Download the Portable build for the operating system, extract it completely, and launch the executable/app.
 
-**Q: 发给别人用，对方没装Python？**  
-A: 把 `dist\WildCamSorter` 文件夹拷过去，双击 `WildCamSorter.exe`。完全绿色免安装。
+**Can I run it directly from the ZIP?** No. Extract the archive completely so bundled dependencies can be found and progress/log files can be written correctly.
 
-**Q: 物种按钮太多显示不下？**  
-A: 每行最多7个按钮，超出自动换行。
+### Technical information
 
-**Q: 为什么有些照片在界面上看不到？**  
-A: 每组超过4个文件时，剩余文件会显示在下方的溢出文件行中。全部文件都会参与分类。
-
-**Q: 进度文件能删吗？**  
-A: 删了会丢失断点续传记录（所有组恢复"未处理"状态），已复制的文件不受影响。
-
----
-
-## 更新日志
-
-### v1.7（当前版本）
-- 独立查看器固定以100%（1:1原始大小）打开，不再默认缩放到50%
-- 视频按原始FPS以1.0倍速播放，并增加可拖动进度条、播放/暂停及9档倍速
-- CSV增加文件名列，图片和视频逐文件记录；重新分类时更新原行，避免重复
-
-### v1.6
-- 启动时一个对话框同时选择输入/输出文件夹（可手打路径 + 文件夹浏览按钮）
-- 物种类别只来自输出文件夹，输入输出彻底分离
-- 反选后出现迷你标签栏：每个文件可独立打标签，支持多类别
-- 标签优先分类：有标签的照片按标签去对应文件夹，无标签的跟随主按钮
-- 磁盘空间不足三重提醒（复制前预检 + 失败弹窗 + 日志记录）
-- 键盘快捷键全部移除，纯鼠标操作
-- 物种按钮去除emoji图标，纯文字显示
-- 图片显示高度优先等比例放大，下边框压缩
-- 迷你标签栏用place定位，显示更可靠
-
-### v1.5
-- 多类别分类：一张照片可分到多个物种文件夹，CSV同步写入多条记录
-- 动态布局：超过4个文件自动显示溢出文件行，全部可见
-- 自定义输出目录：工具栏"输出到"按钮可任选分类结果位置
-- 自动识别已分照片：启动时扫描输出目录，跳过已手动分好的组
-- 日志系统：操作记录到 wildcam_sorter.log，支持轮转
-- 视频播放：opencv + imageio-ffmpeg 双引擎，MP4/MOV稳定播放
-- 物种按钮超过7个自动换行
-
-### v1.0（初始版本）
-- 按物种快速分类野外相机照片和视频
-- 智能分组：自动识别视频和截图（截图数量不固定）
-- 全分辨率查看器：滚轮缩放、拖动平移、播放/暂停
-- 断点续传：进度记录自动保存，重启后从断点继续
-- 改错撤销：退回已分组的组重新分类，自动删除旧文件
-- CSV自动记录：经度、纬度、海拔、物种、拍摄时间、点位名称
-
----
-
-## 技术信息
-
-- Python 3.11 + tkinter（界面）
-- OpenCV + imageio-ffmpeg（视频播放）
-- Pillow（图像处理 + EXIF读取）
-- PyInstaller（打包为独立exe）
-- 仅支持 Windows 10/11 64位
-
----
-
-## © 版权与致谢
-
-**WildCam Sorter** — 野外相机数据分类工具
-
-> **Vibe Coding work**  
-> **Made by Siyuan ZHU, 2026**  
->  
-> *Supported by Deepseek-v4-pro-preview and Deepseek-v4-flash-0731*
-
-**© 2026 Siyuan ZHU. All rights reserved.**
+- Python, tkinter, Pillow, and OpenCV
+- Packaging: PyInstaller
+- Source branch: [v1.7](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.7)
+- Author: Siyuan ZHU
