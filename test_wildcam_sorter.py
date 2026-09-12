@@ -55,9 +55,25 @@ class FullScreenViewerTests(unittest.TestCase):
         viewer.canvas = MagicMock()
         viewer.canvas.winfo_width.return_value = 1200
         viewer.canvas.winfo_height.return_value = 800
-        viewer._set_scale = MagicMock()
+        viewer.zoom_level = 7.0
+        viewer._pan_x = 12
+        viewer._pan_y = 30
+        viewer._update_display = MagicMock()
         viewer._fit_to_window()
-        viewer._set_scale.assert_called_once_with((800 / 3000) * 0.95)
+        self.assertEqual(viewer.zoom_level, 1.0)
+        self.assertEqual((viewer._pan_x, viewer._pan_y), (0.0, 0.0))
+        viewer._update_display.assert_called_once_with()
+
+    def test_wheel_speed_changes_zoom_rate(self):
+        slow = FullScreenViewer.__new__(FullScreenViewer)
+        slow._last_wheel_time = 1.0
+        fast = FullScreenViewer.__new__(FullScreenViewer)
+        fast._last_wheel_time = 1.0
+        with patch.object(wildcam_sorter.time, 'monotonic', return_value=1.2):
+            slow_factor = slow._wheel_factor(120)
+        with patch.object(wildcam_sorter.time, 'monotonic', return_value=1.02):
+            fast_factor = fast._wheel_factor(120)
+        self.assertGreater(fast_factor, slow_factor)
 
 
 class PlatformCompatibilityTests(unittest.TestCase):
@@ -245,6 +261,24 @@ class CaptureModeGroupingTests(unittest.TestCase):
                     cancel_event=cancel_event,
                 )
 
+    def test_ranged_modes_and_selected_range(self):
+        names = [f'{index:03d}.jpg' for index in range(1, 13)]
+        segments = [
+            {'start': 1, 'end': 6, 'photo_count': 2, 'video_count': 0,
+             'order': wildcam_sorter.ORDER_PHOTOS_FIRST},
+            {'start': 7, 'end': 12, 'photo_count': 3, 'video_count': 0,
+             'order': wildcam_sorter.ORDER_PHOTOS_FIRST},
+        ]
+        groups = wildcam_sorter.RangedMediaGroupSequence(
+            'X:/camera', names, segments, selection_start=3, selection_end=10
+        )
+        self.assertEqual(
+            [[os.path.basename(path) for path in group] for group in groups],
+            [['003.jpg', '004.jpg'], ['005.jpg', '006.jpg'],
+             ['007.jpg', '008.jpg', '009.jpg'], ['010.jpg']],
+        )
+        self.assertEqual(groups.all_group_count, 5)
+
 
 class MediaJumpTests(unittest.TestCase):
     def setUp(self):
@@ -358,10 +392,83 @@ class CsvRecordTests(unittest.TestCase):
                 if name.startswith('wildcam_records_旧格式备份_') and name.endswith('.csv')
             ]
             self.assertEqual(len(backups), 1)
-            with open(csv_path, newline='', encoding='utf-8-sig') as handle:
+
+
+class ClassificationQueueTests(unittest.TestCase):
+    def _make_app(self, target_dir, source_dir, files):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app.target_dir = target_dir
+        app.source_dir = source_dir
+        app.current_group_files = files
+        app.selected_flags = [True] * len(files)
+        app.per_file_species = {}
+        app._log = lambda *args, **kwargs: None
+        return app
+
+    def test_ten_rapid_jobs_are_all_copied_and_recorded_in_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = os.path.join(temp_dir, 'source')
+            target_dir = os.path.join(temp_dir, 'output')
+            os.makedirs(source_dir)
+            os.makedirs(target_dir)
+            app = WildCamSorter.__new__(WildCamSorter)
+            app._classify_queue = wildcam_sorter.queue.Queue()
+            app._classify_result_queue = wildcam_sorter.queue.Queue()
+            app._log = lambda *args, **kwargs: None
+            worker = threading.Thread(target=app._classification_worker)
+            worker.start()
+
+            for index in range(10):
+                file_path = os.path.join(source_dir, f'{index + 1:03d}.jpg')
+                with open(file_path, 'wb') as handle:
+                    handle.write(b'test')
+                app._classify_queue.put({
+                    'group_index': index,
+                    'rel_path': f'source/{index + 1:03d}.jpg',
+                    'files': (file_path,),
+                    'selected': (True,),
+                    'per_file_species': {},
+                    'categories': ('赤狐',),
+                    'target_dir': target_dir,
+                    'point_name': 'source',
+                    'old_dest_files': (),
+                    'replace_existing': False,
+                })
+            app._classify_queue.put(None)
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive())
+
+            results = [app._classify_result_queue.get_nowait() for _ in range(10)]
+            self.assertEqual([item['job']['group_index'] for item in results], list(range(10)))
+            self.assertTrue(all(not item['errors'] for item in results))
+            with open(os.path.join(target_dir, 'wildcam_records.csv'),
+                      newline='', encoding='utf-8-sig') as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]['文件名'], "001.jpg")
+            self.assertEqual(len(rows), 10)
+            self.assertEqual([row['文件名'] for row in rows],
+                             [f'{index + 1:03d}.jpg' for index in range(10)])
+
+    def test_manual_output_files_are_backfilled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = os.path.join(temp_dir, 'POINT')
+            target_dir = os.path.join(temp_dir, 'output')
+            category_dir = os.path.join(target_dir, '牛')
+            os.makedirs(source_dir)
+            os.makedirs(category_dir)
+            source_file = os.path.join(source_dir, '001.jpg')
+            output_file = os.path.join(category_dir, '001.jpg')
+            Image = wildcam_sorter.Image
+            Image.new('RGB', (2, 2)).save(source_file)
+            wildcam_sorter.shutil.copy2(source_file, output_file)
+            count = wildcam_sorter.backfill_manual_csv(
+                source_dir, target_dir, {'001.jpg': [('牛', output_file)]}
+            )
+            self.assertEqual(count, 1)
+            with open(os.path.join(target_dir, 'wildcam_records.csv'),
+                      newline='', encoding='utf-8-sig') as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]['文件名'], '001.jpg')
+            self.assertEqual(rows[0]['物种名'], '牛')
 
     def test_new_classification_appends_without_rewriting_large_csv(self):
         metadata = {

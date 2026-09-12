@@ -10,7 +10,7 @@ a = Analysis(
     ['wildcam_sorter.py'],
     pathex=[],
     binaries=av_binaries,
-    datas=av_datas,
+    datas=av_datas + [('README.md', '.')],
     hiddenimports=av_hiddenimports,
     hookspath=[],
     hooksconfig={},

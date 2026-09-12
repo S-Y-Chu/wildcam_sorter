@@ -1,4 +1,4 @@
-WildCam Sorter v1.9（Mac）使用说明
+WildCam Sorter v1.10（Mac）使用说明
 ==================================
 
 一、先确认应该下载哪个版本
@@ -7,10 +7,10 @@ WildCam Sorter v1.9（Mac）使用说明
 点击屏幕左上角“苹果图标 ”→“关于本机”：
 
 1. 如果显示“芯片：Apple M1 / M2 / M3 / M4 / M5……”：
-   使用 WildCamSorter_macOS_AppleSilicon_v1.9.zip。
+   使用 WildCamSorter_macOS_AppleSilicon_v1.10.zip。
 
 2. 如果显示“处理器：Intel……”：
-   使用 WildCamSorter_macOS_Intel_v1.9.zip。
+   使用 WildCamSorter_macOS_Intel_v1.10.zip。
 
 两个版本不能混用。本程序建议在 macOS 13 Ventura 或更高版本运行。
 
@@ -82,6 +82,6 @@ WildCam Sorter v1.9（Mac）使用说明
 ----------------
 
 完整操作方法、拍摄模式设置、复杂分类、CSV 字段和断点续传说明，请查看：
-https://github.com/S-Y-Chu/wildcam_sorter/tree/1.9
+https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10
 
 WildCam Sorter — Made by Siyuan ZHU, 2026

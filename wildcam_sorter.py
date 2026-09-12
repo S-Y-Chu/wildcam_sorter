@@ -54,7 +54,7 @@ from collections.abc import Sequence
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
 import cv2
 import numpy as np
 
@@ -99,11 +99,74 @@ COLOR_BUTTON_NAV = '#424242'         # 灰色 - 导航按钮
 COLOR_PROGRESS = '#1565C0'           # 蓝色 - 进度条
 COLOR_TOOLBAR = '#111111'
 
+APP_VERSION = '1.10'
+THEME_DISPLAY_NAMES = {'system': '跟随系统主题', 'light': '白色主题', 'dark': '黑色主题'}
+THEME_DARK_TO_LIGHT = {
+    '#1E1E1E': '#F3F4F6', '#252525': '#FFFFFF', '#111111': '#E5E7EB',
+    '#1A1A1A': '#EEF0F3', '#242424': '#F8F9FA', '#333333': '#D1D5DB',
+    '#E0E0E0': '#202124', '#CCCCCC': '#303134', '#AAAAAA': '#5F6368',
+    '#888888': '#6B7280', '#424242': '#4B5563', '#555555': '#6B7280',
+}
+
 # CSV固定列。文件名放在第一列，图片和视频统一按“一个文件一行”记录。
 CSV_HEADERS = ['文件名', '经度', '纬度', '海拔高度(m)', '物种名', '拍摄时间', '点位名称']
 
 
 # ==================== 辅助函数 ====================
+
+def settings_file_path() -> str:
+    """返回跨平台用户设置路径。"""
+    if sys.platform.startswith('win'):
+        base = os.environ.get('APPDATA') or str(Path.home())
+    elif sys.platform == 'darwin':
+        base = os.path.join(str(Path.home()), 'Library', 'Application Support')
+    else:
+        base = os.environ.get('XDG_CONFIG_HOME') or os.path.join(str(Path.home()), '.config')
+    return os.path.join(base, 'WildCamSorter', 'settings.json')
+
+
+def load_app_settings() -> dict:
+    defaults = {'theme': 'system'}
+    try:
+        with open(settings_file_path(), 'r', encoding='utf-8') as handle:
+            saved = json.load(handle)
+        if saved.get('theme') in THEME_DISPLAY_NAMES:
+            defaults.update(saved)
+    except (OSError, ValueError, TypeError):
+        pass
+    return defaults
+
+
+def save_app_settings(settings: dict):
+    path = settings_file_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp = path + '.tmp'
+    with open(temp, 'w', encoding='utf-8') as handle:
+        json.dump(settings, handle, ensure_ascii=False, indent=2)
+    os.replace(temp, path)
+
+
+def system_uses_dark_theme() -> bool:
+    """尽力读取操作系统主题；无法读取时按当地时段给出稳定后备。"""
+    try:
+        if sys.platform.startswith('win'):
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+            )
+            value, _ = winreg.QueryValueEx(key, 'AppsUseLightTheme')
+            return int(value) == 0
+        if sys.platform == 'darwin':
+            import subprocess
+            result = subprocess.run(
+                ['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+                capture_output=True, text=True, timeout=1
+            )
+            return result.returncode == 0 and 'dark' in result.stdout.lower()
+    except Exception:
+        pass
+    return False
 
 def natural_sort_key(filename: str) -> list:
     """
@@ -243,6 +306,131 @@ class MediaGroupSequence(Sequence):
         names = self.file_names[start:start + self.group_size]
         return [os.path.join(self.source_dir, name) for name in names]
 
+    def group_index_for_file(self, file_index: int):
+        if 0 <= file_index < len(self.file_names):
+            return file_index // self.group_size
+        return None
+
+    def mode_for_group(self, index: int):
+        return None
+
+
+class RangedMediaGroupSequence(Sequence):
+    """按多个1-based文件序号范围分组，访问时才生成路径，适合超大目录。"""
+
+    def __init__(self, source_dir: str, file_names: list, segments: list,
+                 selection_start: int = 1, selection_end: int = None):
+        self.source_dir = os.path.abspath(source_dir)
+        self.file_names = file_names
+        self.segments = self._cover_segments(segments, len(file_names))
+        total_files = len(file_names)
+        self.selection_start = max(1, int(selection_start or 1))
+        self.selection_end = min(total_files, int(selection_end or total_files))
+        if self.selection_end < self.selection_start:
+            raise ValueError('选中范围的结束序号不能小于开始序号')
+        self._entries = []
+        cumulative = 0
+        self.all_group_count = 0
+        for segment in self.segments:
+            start0 = segment['start'] - 1
+            end0 = min(segment['end'], total_files)
+            size = segment['photo_count'] + segment['video_count']
+            full_count = max(0, (end0 - start0 + size - 1) // size)
+            self.all_group_count += full_count
+            selected_start0 = max(start0, self.selection_start - 1)
+            selected_end0 = min(end0, self.selection_end)
+            if selected_start0 >= selected_end0:
+                continue
+            first_local = (selected_start0 - start0) // size
+            last_local = (selected_end0 - 1 - start0) // size
+            count = last_local - first_local + 1
+            self._entries.append({
+                'segment': segment, 'start0': start0, 'end0': end0,
+                'size': size, 'first_local': first_local, 'count': count,
+                'cumulative': cumulative,
+            })
+            cumulative += count
+
+    @staticmethod
+    def _cover_segments(segments: list, total_files: int) -> list:
+        """补齐未配置区间；空档沿用前一个模式，首段前空档沿用首个模式。"""
+        if not segments:
+            segments = [{'start': 1, 'end': total_files, 'photo_count': 3,
+                         'video_count': 1, 'order': ORDER_VIDEOS_FIRST}]
+        clean = sorted((dict(item) for item in segments), key=lambda x: int(x['start']))
+        result = []
+        cursor = 1
+        previous = clean[0]
+        for raw in clean:
+            start = max(cursor, int(raw['start']))
+            end = min(total_files, int(raw.get('end') or total_files))
+            photo, video, order = validate_capture_mode(
+                raw['photo_count'], raw['video_count'], raw['order']
+            )
+            if cursor < start:
+                filler = dict(previous)
+                filler.update(start=cursor, end=start - 1)
+                result.append(filler)
+            if start <= end:
+                item = dict(start=start, end=end, photo_count=photo,
+                            video_count=video, order=order)
+                result.append(item)
+                previous = item
+                cursor = end + 1
+        if cursor <= total_files:
+            filler = dict(previous)
+            filler.update(start=cursor, end=total_files)
+            result.append(filler)
+        return result
+
+    @property
+    def total_files(self):
+        return max(0, self.selection_end - self.selection_start + 1)
+
+    def __len__(self):
+        return sum(entry['count'] for entry in self._entries)
+
+    def _locate(self, index: int):
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        for entry in self._entries:
+            if index < entry['cumulative'] + entry['count']:
+                local = entry['first_local'] + index - entry['cumulative']
+                return entry, local
+        raise IndexError(index)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        entry, local = self._locate(index)
+        start0 = entry['start0'] + local * entry['size']
+        end0 = min(start0 + entry['size'], entry['end0'])
+        start0 = max(start0, self.selection_start - 1)
+        end0 = min(end0, self.selection_end)
+        return [os.path.join(self.source_dir, name)
+                for name in self.file_names[start0:end0]]
+
+    def mode_for_group(self, index: int):
+        entry, _ = self._locate(index)
+        return entry['segment']
+
+    def group_index_for_file(self, file_index: int):
+        if not (self.selection_start - 1 <= file_index < self.selection_end):
+            return None
+        for entry in self._entries:
+            if entry['start0'] <= file_index < entry['end0']:
+                local = (file_index - entry['start0']) // entry['size']
+                if entry['first_local'] <= local < entry['first_local'] + entry['count']:
+                    return entry['cumulative'] + local - entry['first_local']
+        return None
+
+    def all_view(self):
+        return RangedMediaGroupSequence(
+            self.source_dir, self.file_names, self.segments, 1, len(self.file_names)
+        )
+
 
 def media_sequence_number(filename: str):
     """提取扩展名前最后一段数字作为媒体序号；没有数字时返回 None。"""
@@ -251,7 +439,7 @@ def media_sequence_number(filename: str):
     return int(matches[-1]) if matches else None
 
 
-def search_media_group_chunk(groups: MediaGroupSequence, query: str,
+def search_media_group_chunk(groups, query: str,
                              start_index: int = 0, chunk_size: int = 20000) -> tuple:
     """
     分批查找序号或文件名，返回 (组索引或None, 下一文件索引, 是否完成)。
@@ -271,7 +459,7 @@ def search_media_group_chunk(groups: MediaGroupSequence, query: str,
             stem = os.path.splitext(filename)[0]
             matched = filename.lower() == query_lower or stem.lower() == query_lower
         if matched:
-            return file_index // groups.group_size, file_index + 1, True
+            return groups.group_index_for_file(file_index), file_index + 1, True
     return None, end_index, end_index >= len(names)
 
 
@@ -456,7 +644,9 @@ def scan_classified_media(target_dir: str, source_basename: str,
                             raise ScanCancelled()
                     try:
                         if entry.is_file(follow_symlinks=False) and is_media_file(entry.name):
-                            existing_files[entry.name] = category_name
+                            existing_files.setdefault(entry.name, []).append(
+                                (category_name, entry.path)
+                            )
                     except OSError:
                         continue
                     if progress_callback is not None and visited % 2000 == 0:
@@ -494,11 +684,14 @@ def merge_presorted_progress(groups: Sequence, parent_dir: str, target_dir: str,
 
         dest_files = []
         species_name = None
+        categories = []
         for name in names:
-            category = existing_files[name]
-            dest_files.append(os.path.join(target_dir, category, name))
-            if species_name is None:
-                species_name = category
+            for category, dest_path in existing_files[name]:
+                dest_files.append(dest_path)
+                if category not in categories:
+                    categories.append(category)
+        if categories:
+            species_name = '、'.join(categories)
         processed_groups.add(rel_path)
         class_history[rel_path] = {
             'species': species_name or '未知',
@@ -509,6 +702,71 @@ def merge_presorted_progress(groups: Sequence, parent_dir: str, target_dir: str,
             progress_callback('匹配已有分类', group_idx + 1, newly_found)
 
     return processed_groups, class_history, newly_found
+
+
+def backfill_manual_csv(source_dir: str, target_dir: str, existing_files: dict,
+                        progress_callback=None, cancel_event=None) -> int:
+    """把输出目录中人工复制、但CSV尚未记录的原名媒体补写为一文件一行。"""
+    if not existing_files:
+        return 0
+    csv_path = os.path.join(target_dir, 'wildcam_records.csv')
+    point_name = os.path.basename(source_dir)
+    recorded = set()
+    has_schema = False
+    try:
+        if os.path.isfile(csv_path) and os.path.getsize(csv_path):
+            with open(csv_path, 'r', newline='', encoding='utf-8-sig') as handle:
+                reader = csv.DictReader(handle)
+                has_schema = '文件名' in (reader.fieldnames or [])
+                if has_schema:
+                    recorded = {
+                        row.get('文件名', '') for row in reader
+                        if row.get('点位名称', '') == point_name
+                    }
+    except (OSError, csv.Error):
+        return 0
+
+    if os.path.isfile(csv_path) and not has_schema:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup = os.path.splitext(csv_path)[0] + f'_旧格式备份_{timestamp}.csv'
+        try:
+            shutil.copy2(csv_path, backup)
+        except OSError:
+            return 0
+
+    rows = []
+    for index, (filename, locations) in enumerate(existing_files.items()):
+        if cancel_event is not None and index % 128 == 0 and cancel_event.is_set():
+            raise ScanCancelled()
+        if filename in recorded:
+            continue
+        source_path = os.path.join(source_dir, filename)
+        if not os.path.isfile(source_path):
+            continue
+        metadata = extract_gps_from_file(source_path)
+        categories = sorted({item[0] for item in locations}, key=natural_sort_key)
+        rows.append({
+            '文件名': filename,
+            '经度': f"{metadata['longitude']:.6f}" if metadata['longitude'] is not None else '',
+            '纬度': f"{metadata['latitude']:.6f}" if metadata['latitude'] is not None else '',
+            '海拔高度(m)': f"{metadata['altitude']:.1f}" if metadata['altitude'] is not None else '',
+            '物种名': '；'.join(categories),
+            '拍摄时间': metadata['datetime'].strftime('%Y-%m-%d %H:%M:%S')
+            if metadata['datetime'] else '',
+            '点位名称': point_name,
+        })
+        if progress_callback is not None and index and index % 500 == 0:
+            progress_callback('补写人工分类CSV', index, len(rows))
+
+    if not rows:
+        return 0
+    mode = 'a' if has_schema else 'w'
+    with open(csv_path, mode, newline='', encoding='utf-8-sig') as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_HEADERS)
+        if mode == 'w':
+            writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
 
 
 def extract_gps_from_file(file_path: str) -> dict:
@@ -528,6 +786,7 @@ def extract_gps_from_file(file_path: str) -> dict:
         'datetime': None     # datetime 对象
     }
     
+    img = None
     try:
         img = Image.open(file_path)
         
@@ -591,6 +850,12 @@ def extract_gps_from_file(file_path: str) -> dict:
         
     except Exception:
         pass  # 非图片文件或EXIF读取失败，静默返回空值
+    finally:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
     
     return result
 
@@ -796,6 +1061,17 @@ class MediaPanel:
         self.media_label.config(image='', text=text)
         self.title_label.config(text=self.label_text)
         self.set_selected(False)
+
+    def display_loading(self, file_path: str, label_text: str = None):
+        """立即切换面板身份，缩略图随后由后台线程填入。"""
+        self.file_path = file_path
+        if label_text is not None:
+            self.label_text = label_text
+        self._photo = None
+        self.title_label.config(
+            text=f"{self.label_text} | {os.path.basename(file_path)}"
+        )
+        self.media_label.config(image='', text="加载中…")
     
     def _calc_display_size(self):
         """
@@ -1111,7 +1387,9 @@ class PathSelectDialog:
     
     def __init__(self, parent, initial_input: str = "", initial_output: str = "",
                  initial_photo_count: int = 3, initial_video_count: int = 1,
-                 initial_order: str = ORDER_VIDEOS_FIRST):
+                 initial_order: str = ORDER_VIDEOS_FIRST,
+                 initial_segments: list = None,
+                 initial_selection: tuple = (1, None)):
         """
         参数：
             parent: 父窗口
@@ -1182,19 +1460,21 @@ class PathSelectDialog:
         self.entry_photo_count = tk.Entry(mode_row, font=("微软雅黑", 10), width=4,
                                           justify=tk.CENTER)
         self.entry_photo_count.pack(side=tk.LEFT, padx=(6, 2), ipady=2)
-        self.entry_photo_count.insert(0, str(initial_photo_count))
+        first_segment = (initial_segments or [{}])[0]
+        self.entry_photo_count.insert(0, str(first_segment.get('photo_count', initial_photo_count)))
         tk.Label(mode_row, text="张照片 +", font=("微软雅黑", 9),
                  bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
 
         self.entry_video_count = tk.Entry(mode_row, font=("微软雅黑", 10), width=4,
                                           justify=tk.CENTER)
         self.entry_video_count.pack(side=tk.LEFT, padx=(6, 2), ipady=2)
-        self.entry_video_count.insert(0, str(initial_video_count))
+        self.entry_video_count.insert(0, str(first_segment.get('video_count', initial_video_count)))
         tk.Label(mode_row, text="个视频", font=("微软雅黑", 9),
                  bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
 
         self.order_var = tk.StringVar(
-            value=ORDER_DISPLAY_NAMES.get(initial_order, ORDER_DISPLAY_NAMES[ORDER_VIDEOS_FIRST])
+            value=ORDER_DISPLAY_NAMES.get(first_segment.get('order', initial_order),
+                                           ORDER_DISPLAY_NAMES[ORDER_VIDEOS_FIRST])
         )
         self.order_combo = ttk.Combobox(
             mode_row, textvariable=self.order_var,
@@ -1203,6 +1483,54 @@ class PathSelectDialog:
             state='readonly', width=9, font=("微软雅黑", 9)
         )
         self.order_combo.pack(side=tk.RIGHT, padx=(8, 0))
+
+        # ---- 模式生效范围 / 多段模式 ----
+        scope_row = tk.Frame(mode_box, bg='#1E1E1E')
+        scope_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(scope_row, text="上述模式适用于文件序号", font=("微软雅黑", 9),
+                 bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
+        self.entry_mode_start = tk.Entry(scope_row, width=7, justify=tk.CENTER)
+        self.entry_mode_start.pack(side=tk.LEFT, padx=4)
+        self.entry_mode_start.insert(0, str(first_segment.get('start', 1)))
+        tk.Label(scope_row, text="至", bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
+        self.entry_mode_end = tk.Entry(scope_row, width=9, justify=tk.CENTER)
+        self.entry_mode_end.pack(side=tk.LEFT, padx=4)
+        first_end = first_segment.get('end')
+        if first_end:
+            self.entry_mode_end.insert(0, str(first_end))
+        tk.Label(scope_row, text="（留空=最后一个文件）", font=("微软雅黑", 8),
+                 bg='#1E1E1E', fg='#888888').pack(side=tk.LEFT)
+
+        self.extra_segment_rows = []
+        self.extra_segments_frame = tk.Frame(mode_box, bg='#1E1E1E')
+        self.extra_segments_frame.pack(fill=tk.X)
+        for segment in (initial_segments or [])[1:]:
+            self._add_segment_row(segment)
+        tk.Button(
+            mode_box, text="＋ 添加下一个模式范围", font=("微软雅黑", 9),
+            bg='#455A64', fg='white', relief=tk.FLAT, cursor='hand2',
+            command=self._add_segment_row
+        ).pack(anchor='w', pady=(7, 0))
+
+        selection_box = tk.LabelFrame(
+            self.window, text=" 本次只查看/分类的范围 ", font=("微软雅黑", 9, "bold"),
+            bg='#1E1E1E', fg='#E0E0E0', padx=10, pady=7
+        )
+        selection_box.pack(fill=tk.X, padx=20, pady=(6, 2))
+        tk.Label(selection_box, text="文件序号", bg='#1E1E1E',
+                 fg='#E0E0E0').pack(side=tk.LEFT)
+        self.entry_selection_start = tk.Entry(selection_box, width=9, justify=tk.CENTER)
+        self.entry_selection_start.pack(side=tk.LEFT, padx=5)
+        self.entry_selection_start.insert(0, str((initial_selection or (1, None))[0] or 1))
+        tk.Label(selection_box, text="至", bg='#1E1E1E',
+                 fg='#E0E0E0').pack(side=tk.LEFT)
+        self.entry_selection_end = tk.Entry(selection_box, width=11, justify=tk.CENTER)
+        self.entry_selection_end.pack(side=tk.LEFT, padx=5)
+        selected_end = (initial_selection or (1, None))[1]
+        if selected_end:
+            self.entry_selection_end.insert(0, str(selected_end))
+        tk.Label(selection_box, text="（留空=全部）", font=("微软雅黑", 8),
+                 bg='#1E1E1E', fg='#888888').pack(side=tk.LEFT)
 
         # ---- 提示文字 ----
         tk.Label(
@@ -1232,6 +1560,37 @@ class PathSelectDialog:
         x = parent.winfo_rootx() + (parent.winfo_width() - self.window.winfo_width()) // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.window.winfo_height()) // 3
         self.window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _add_segment_row(self, values=None):
+        values = values if isinstance(values, dict) else {}
+        row = tk.Frame(self.extra_segments_frame, bg='#1E1E1E')
+        row.pack(fill=tk.X, pady=(6, 0))
+        entries = {}
+        for label, key, width, default in (
+                ('序号', 'start', 6, ''), ('至', 'end', 7, ''),
+                ('照片', 'photo_count', 4, 3), ('视频', 'video_count', 4, 1)):
+            tk.Label(row, text=label, bg='#1E1E1E', fg='#E0E0E0').pack(side=tk.LEFT)
+            entry = tk.Entry(row, width=width, justify=tk.CENTER)
+            entry.pack(side=tk.LEFT, padx=(2, 5))
+            value = values.get(key, default)
+            if value not in ('', None):
+                entry.insert(0, str(value))
+            entries[key] = entry
+        order_var = tk.StringVar(value=ORDER_DISPLAY_NAMES.get(
+            values.get('order', ORDER_VIDEOS_FIRST), ORDER_DISPLAY_NAMES[ORDER_VIDEOS_FIRST]
+        ))
+        ttk.Combobox(row, textvariable=order_var,
+                     values=list(ORDER_DISPLAY_NAMES.values()), state='readonly',
+                     width=9).pack(side=tk.LEFT, padx=4)
+        item = {'frame': row, 'entries': entries, 'order_var': order_var}
+        tk.Button(row, text="删除", bg='#8E2A2A', fg='white', relief=tk.FLAT,
+                  command=lambda: self._remove_segment_row(item)).pack(side=tk.RIGHT)
+        self.extra_segment_rows.append(item)
+
+    def _remove_segment_row(self, item):
+        if item in self.extra_segment_rows:
+            self.extra_segment_rows.remove(item)
+            item['frame'].destroy()
     
     def _browse(self, entry: tk.Entry):
         """浏览按钮：弹出文件夹选择并填入输入框"""
@@ -1256,7 +1615,48 @@ class PathSelectDialog:
                 self.entry_video_count.get().strip(),
                 display_to_order.get(self.order_var.get())
             )
-        except ValueError as exc:
+            first_start = int(self.entry_mode_start.get().strip() or '1')
+            first_end_text = self.entry_mode_end.get().strip()
+            segments = [{
+                'start': first_start,
+                'end': int(first_end_text) if first_end_text else None,
+                'photo_count': photo_count,
+                'video_count': video_count,
+                'order': media_order,
+            }]
+            for row in self.extra_segment_rows:
+                entries = row['entries']
+                start_text = entries['start'].get().strip()
+                end_text = entries['end'].get().strip()
+                if not start_text:
+                    raise ValueError('新增模式范围必须填写开始序号')
+                p, v, order = validate_capture_mode(
+                    entries['photo_count'].get().strip(),
+                    entries['video_count'].get().strip(),
+                    display_to_order.get(row['order_var'].get())
+                )
+                segments.append({
+                    'start': int(start_text), 'end': int(end_text) if end_text else None,
+                    'photo_count': p, 'video_count': v, 'order': order,
+                })
+            segments.sort(key=lambda item: item['start'])
+            for index, segment in enumerate(segments):
+                if segment['start'] < 1:
+                    raise ValueError('范围序号必须从1开始')
+                if segment['end'] is not None and segment['end'] < segment['start']:
+                    raise ValueError('模式范围的结束序号不能小于开始序号')
+                if index < len(segments) - 1:
+                    if segment['end'] is None:
+                        segment['end'] = segments[index + 1]['start'] - 1
+                    if segment['end'] >= segments[index + 1]['start']:
+                        raise ValueError('不同模式范围不能重叠')
+            selection_start = int(self.entry_selection_start.get().strip() or '1')
+            selection_end_text = self.entry_selection_end.get().strip()
+            selection_end = int(selection_end_text) if selection_end_text else None
+            if selection_start < 1 or (selection_end is not None
+                                       and selection_end < selection_start):
+                raise ValueError('本次查看范围填写不正确')
+        except (ValueError, TypeError) as exc:
             messagebox.showwarning("拍摄模式错误", str(exc), parent=self.window)
             return
         
@@ -1286,7 +1686,7 @@ class PathSelectDialog:
             )
             return
         
-        self.result = (in_path, out_path, photo_count, video_count, media_order)
+        self.result = (in_path, out_path, segments, selection_start, selection_end)
         self.window.destroy()
     
     def _on_cancel(self):
@@ -1301,15 +1701,15 @@ class FullScreenViewer:
     
     功能：
         - 打开时自动适合窗口，图片/视频完整可见
-        - 鼠标滚轮缩放（10%~500%）
+        - 鼠标滚轮围绕指针缩放（窗口适配大小的100%~1000%）
         - 鼠标拖动平移（放大后）
         - 空格键播放/暂停视频
         - ESC 或返回按钮关闭
     """
     
-    MIN_SCALE = 0.1   # 最小缩放10%
-    MAX_SCALE = 5.0   # 最大缩放500%
-    SCALE_STEP = 0.1  # 滚轮每次变化10%
+    MIN_ZOOM = 1.0    # 100% = 当前窗口中完整显示媒体的大小
+    MAX_ZOOM = 10.0   # 1000%
+    BUTTON_ZOOM_FACTOR = 1.2
     PLAYBACK_RATES = (0.5, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5, 2.0)
     PLAYBACK_RATE_LABELS = ('0.5×', '0.75×', '0.8×', '0.9×', '1.0×',
                             '1.1×', '1.2×', '1.5×', '2×')
@@ -1323,7 +1723,9 @@ class FullScreenViewer:
         """
         self.file_path = file_path
         self.is_video = is_video
-        self.scale_factor = 1.0       # 当前缩放比例（1.0=100%原始大小）
+        self.zoom_level = 1.0         # 相对适合窗口比例（1.0=界面显示100%）
+        self.fit_scale = 1.0          # 适合窗口相对于原始像素的比例
+        self.scale_factor = 1.0       # 实际渲染比例 = fit_scale * zoom_level
         self._orig_image = None       # PIL.Image：原始图片（静态）或当前视频帧
         self._display_photo = None    # PhotoImage：当前显示的图像
         self._video_cap = None        # cv2.VideoCapture（视频用）
@@ -1339,11 +1741,25 @@ class FullScreenViewer:
         self._drag_start = None       # 拖动起始坐标
         self._canvas_img_id = None    # Canvas中图片的ID
         self._canvas_resize_after_id = None
+        self._image_left = 0.0
+        self._image_top = 0.0
+        self._rendered_size = (1, 1)
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._last_wheel_time = None
         
         # 创建顶层窗口
         self.window = tk.Toplevel(parent)
         self.window.title(f"🔍 {os.path.basename(file_path)}")
-        self.window.geometry("1400x950")
+        # 按可用屏幕居中，并在四周留出余量，避免任务栏/程序坞遮住底部控件。
+        self.window.update_idletasks()
+        screen_w = max(800, self.window.winfo_screenwidth())
+        screen_h = max(600, self.window.winfo_screenheight())
+        window_w = min(1400, max(760, screen_w - 80))
+        window_h = min(950, max(520, screen_h - 120))
+        window_x = max(0, (screen_w - window_w) // 2)
+        window_y = max(0, (screen_h - window_h) // 2 - 10)
+        self.window.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
         self.window.configure(bg='#111111')
         self.window.minsize(600, 400)
         
@@ -1390,6 +1806,9 @@ class FullScreenViewer:
         
         self.h_scroll.config(command=self.canvas.xview)
         self.v_scroll.config(command=self.canvas.yview)
+        # 查看器采用视口切片渲染，无需生成可能占数百MB的整张1000%位图。
+        self.h_scroll.pack_forget()
+        self.v_scroll.pack_forget()
         
         # ---- 底部控制栏 ----
         # 视频使用独立的播放行和缩放行，避免进度条/倍速控件被缩放按钮挤掉。
@@ -1409,13 +1828,15 @@ class FullScreenViewer:
         # 缩小按钮
         btn_zoom_out = tk.Button(zoom_row, text="🔍− 缩小", font=("微软雅黑", 10),
                                  bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
-                                 command=lambda: self._zoom(-self.SCALE_STEP), padx=8, pady=3)
+                                 command=lambda: self._zoom_by_factor(
+                                     1.0 / self.BUTTON_ZOOM_FACTOR), padx=8, pady=3)
         btn_zoom_out.pack(side=tk.LEFT, padx=8, pady=4)
         
         # 放大按钮
         btn_zoom_in = tk.Button(zoom_row, text="🔍+ 放大", font=("微软雅黑", 10),
                                 bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
-                                command=lambda: self._zoom(self.SCALE_STEP), padx=8, pady=3)
+                                command=lambda: self._zoom_by_factor(
+                                    self.BUTTON_ZOOM_FACTOR), padx=8, pady=3)
         btn_zoom_in.pack(side=tk.LEFT, padx=2, pady=4)
         
         # 适合窗口按钮
@@ -1427,7 +1848,7 @@ class FullScreenViewer:
         # 100%按钮
         btn_100 = tk.Button(zoom_row, text="1:1 原始", font=("微软雅黑", 10),
                             bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
-                            command=lambda: self._set_scale(1.0), padx=8, pady=3)
+                            command=self._show_original_pixels, padx=8, pady=3)
         btn_100.pack(side=tk.LEFT, padx=2, pady=4)
         
         # 播放控制（仅视频）
@@ -1483,7 +1904,7 @@ class FullScreenViewer:
             self._load_video()
         else:
             self._load_image()
-        # 等窗口布局完成后按窗口适配；“1:1 原始”按钮仍可随时查看原始像素。
+        # 等窗口布局完成后按窗口适配；此时界面缩放值固定显示100%。
         self.window.after(120, self._fit_to_window)
     
     # ==================== 图片加载 ====================
@@ -1703,54 +2124,111 @@ class FullScreenViewer:
     
     # ==================== 显示更新 ====================
     
-    def _update_display(self):
-        """根据当前scale_factor更新Canvas中的显示图像"""
+    def _calculate_fit_scale(self):
+        """计算完整显示媒体所需的原始像素缩放比例。"""
+        if self._orig_image is None:
+            return 1.0
+        canvas_w = max(1, self.canvas.winfo_width())
+        canvas_h = max(1, self.canvas.winfo_height())
+        orig_w, orig_h = self._orig_image.size
+        return max(0.0001, min(canvas_w / orig_w, canvas_h / orig_h) * 0.98)
+
+    def _update_display(self, anchor=None):
+        """刷新显示；anchor=(x,y,image_x,image_y)时保持鼠标下像素不动。"""
         if self._orig_image is None:
             return
-        
+
+        old_w, old_h = self._rendered_size
+        old_left, old_top = self._image_left, self._image_top
+        self.fit_scale = self._calculate_fit_scale()
+        self.scale_factor = self.fit_scale * self.zoom_level
         orig_w, orig_h = self._orig_image.size
         new_w = max(1, int(orig_w * self.scale_factor))
         new_h = max(1, int(orig_h * self.scale_factor))
-        
-        # 缩放图像（LANCZOS高质量）
-        if new_w != orig_w or new_h != orig_h:
-            display_img = self._orig_image.resize((new_w, new_h), Image.LANCZOS)
-        else:
-            display_img = self._orig_image.copy()
-        
-        self._display_photo = ImageTk.PhotoImage(display_img)
-        
-        # 更新Canvas
+
         if self._canvas_img_id:
             self.canvas.delete(self._canvas_img_id)
-        
-        # 居中放置图片
-        canvas_w = self.canvas.winfo_width()
-        canvas_h = self.canvas.winfo_height()
-        x = max(new_w // 2, canvas_w // 2)
-        y = max(new_h // 2, canvas_h // 2)
-        
-        self._canvas_img_id = self.canvas.create_image(x, y, anchor=tk.CENTER,
-                                                        image=self._display_photo)
-        
-        # 更新scrollregion（支持滚动）
-        self.canvas.config(scrollregion=(0, 0, max(new_w, canvas_w), max(new_h, canvas_h)))
-        
-        # 更新缩放标签
-        pct = int(self.scale_factor * 100)
+
+        canvas_w = max(1, self.canvas.winfo_width())
+        canvas_h = max(1, self.canvas.winfo_height())
+        base_left = (canvas_w - new_w) / 2.0
+        base_top = (canvas_h - new_h) / 2.0
+        if anchor is not None:
+            pointer_x, pointer_y, image_x, image_y = anchor
+            left = pointer_x - image_x * new_w
+            top = pointer_y - image_y * new_h
+            self._pan_x = left - base_left
+            self._pan_y = top - base_top
+        else:
+            left = base_left + self._pan_x
+            top = base_top + self._pan_y
+
+        if new_w <= canvas_w:
+            left = base_left
+            self._pan_x = 0.0
+        else:
+            left = min(0.0, max(canvas_w - new_w, left))
+            self._pan_x = left - base_left
+        if new_h <= canvas_h:
+            top = base_top
+            self._pan_y = 0.0
+        else:
+            top = min(0.0, max(canvas_h - new_h, top))
+            self._pan_y = top - base_top
+
+        self._image_left = left
+        self._image_top = top
+        self._rendered_size = (new_w, new_h)
+
+        # 只重采样当前可见区域。即使1000%，内存也约等于窗口大小，而不是
+        # 10倍宽×10倍高的整图，避免大图缩放时卡死。
+        visible_left = max(0, int(-left))
+        visible_top = max(0, int(-top))
+        visible_right = min(new_w, int(canvas_w - left + 1))
+        visible_bottom = min(new_h, int(canvas_h - top + 1))
+        if visible_right > visible_left and visible_bottom > visible_top:
+            crop_box = (
+                visible_left / self.scale_factor,
+                visible_top / self.scale_factor,
+                visible_right / self.scale_factor,
+                visible_bottom / self.scale_factor,
+            )
+            crop = self._orig_image.crop(crop_box)
+            target_size = (visible_right - visible_left, visible_bottom - visible_top)
+            if crop.size != target_size:
+                crop = crop.resize(target_size, Image.Resampling.LANCZOS)
+            self._display_photo = ImageTk.PhotoImage(crop)
+            self._canvas_img_id = self.canvas.create_image(
+                max(0, int(left)), max(0, int(top)), anchor=tk.NW,
+                image=self._display_photo
+            )
+        self.canvas.config(scrollregion=(0, 0, canvas_w, canvas_h))
+
+        pct = int(round(self.zoom_level * 100))
         self.label_zoom.config(text=f"{pct}%")
     
     # ==================== 缩放 ====================
     
-    def _zoom(self, delta: float):
-        """改变缩放比例"""
-        new_scale = self.scale_factor + delta
-        self._set_scale(new_scale)
-    
-    def _set_scale(self, scale: float):
-        """设置缩放比例（限制在MIN~MAX范围内）"""
-        self.scale_factor = max(self.MIN_SCALE, min(self.MAX_SCALE, scale))
-        self._update_display()
+    def _pointer_anchor(self, pointer_x: float, pointer_y: float):
+        """返回鼠标下方在当前图像中的归一化坐标。"""
+        rendered_w, rendered_h = self._rendered_size
+        image_x = (pointer_x - self._image_left) / max(rendered_w, 1)
+        image_y = (pointer_y - self._image_top) / max(rendered_h, 1)
+        return (pointer_x, pointer_y,
+                min(max(image_x, 0.0), 1.0),
+                min(max(image_y, 0.0), 1.0))
+
+    def _set_zoom(self, zoom: float, pointer=None):
+        """设置相对窗口适配的缩放值，并可围绕鼠标位置缩放。"""
+        zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, float(zoom)))
+        if abs(zoom - self.zoom_level) < 1e-6:
+            return
+        anchor = self._pointer_anchor(*pointer) if pointer is not None else None
+        self.zoom_level = zoom
+        self._update_display(anchor=anchor)
+
+    def _zoom_by_factor(self, factor: float, pointer=None):
+        self._set_zoom(self.zoom_level * factor, pointer=pointer)
     
     def _fit_to_window(self):
         """缩放至适合窗口（图片完整可见）"""
@@ -1761,24 +2239,51 @@ class FullScreenViewer:
         if canvas_w <= 10 or canvas_h <= 10:
             return
         
-        orig_w, orig_h = self._orig_image.size
-        fit_scale = min(canvas_w / orig_w, canvas_h / orig_h) * 0.95
-        self._set_scale(fit_scale)
+        self.zoom_level = self.MIN_ZOOM
+        self._pan_x = self._pan_y = 0.0
+        self._update_display()
+
+    def _show_original_pixels(self):
+        """以一个屏幕像素对应一个图片像素显示（受100%~1000%限制）。"""
+        fit_scale = self._calculate_fit_scale()
+        self._set_zoom(1.0 / max(fit_scale, 0.0001))
+
+    def _wheel_factor(self, event_delta: float) -> float:
+        """根据滚轮速度返回倍率：慢转约两圈、快转约半圈达到10倍。"""
+        now = time.monotonic()
+        elapsed = None if self._last_wheel_time is None else now - self._last_wheel_time
+        self._last_wheel_time = now
+        if elapsed is None:
+            steps_per_decade = 12.0
+        elif elapsed <= 0.045:
+            steps_per_decade = 6.0
+        elif elapsed >= 0.16:
+            steps_per_decade = 24.0
+        else:
+            ratio = (elapsed - 0.045) / (0.16 - 0.045)
+            steps_per_decade = 6.0 + ratio * 18.0
+        magnitude = abs(event_delta) / 120.0 if abs(event_delta) >= 120 else abs(event_delta)
+        magnitude = min(max(magnitude, 1.0), 4.0)
+        return 10.0 ** (magnitude / steps_per_decade)
     
     def _on_mousewheel(self, event):
         """Windows鼠标滚轮缩放"""
-        if event.delta > 0:
-            self._zoom(self.SCALE_STEP)
-        else:
-            self._zoom(-self.SCALE_STEP)
+        factor = self._wheel_factor(event.delta)
+        if event.delta < 0:
+            factor = 1.0 / factor
+        self._zoom_by_factor(factor, pointer=(event.x, event.y))
+        return 'break'
     
     def _on_mousewheel_up(self, event):
         """Linux滚轮上（放大）"""
-        self._zoom(self.SCALE_STEP)
+        self._zoom_by_factor(self._wheel_factor(1), pointer=(event.x, event.y))
+        return 'break'
     
     def _on_mousewheel_down(self, event):
         """Linux滚轮下（缩小）"""
-        self._zoom(-self.SCALE_STEP)
+        self._zoom_by_factor(1.0 / self._wheel_factor(-1),
+                             pointer=(event.x, event.y))
+        return 'break'
 
     def _on_canvas_configure(self, event=None):
         """窗口布局变化时保持当前缩放比例，只重新居中显示。"""
@@ -1791,12 +2296,13 @@ class FullScreenViewer:
 
     def _refresh_after_canvas_resize(self):
         self._canvas_resize_after_id = None
+        # 保持用户看到的100%~1000%级别；窗口尺寸变化时重新计算适配基准。
         self._update_display()
     
     # ==================== 拖动平移 ====================
     
     def _on_drag_start(self, event):
-        """记录拖动起始位置"""
+        """记录起点；移动多少像素，图片就移动多少像素。"""
         self._drag_start = (event.x, event.y)
         self.canvas.config(cursor='fleur')  # 移动光标
     
@@ -1804,11 +2310,12 @@ class FullScreenViewer:
         """拖动平移图片"""
         if self._drag_start is None:
             return
-        dx = self._drag_start[0] - event.x
-        dy = self._drag_start[1] - event.y
-        self.canvas.xview_scroll(dx, 'units')
-        self.canvas.yview_scroll(dy, 'units')
+        dx = event.x - self._drag_start[0]
+        dy = event.y - self._drag_start[1]
+        self._pan_x += dx
+        self._pan_y += dy
         self._drag_start = (event.x, event.y)
+        self._update_display()
     
     # ==================== 关闭 ====================
     
@@ -1860,6 +2367,8 @@ class WildCamSorter:
     """
     
     def __init__(self, source_dir: str = None):
+        self.settings = load_app_settings()
+        self._active_theme = None
         # ===== 数据状态 =====
         self.source_dir = None            # 源文件夹路径（输入）
         self.target_dir = None            # 目标文件夹路径（输出，默认为源文件夹的父目录）
@@ -1876,6 +2385,11 @@ class WildCamSorter:
         self.photo_count = 3             # 每组照片数
         self.video_count = 1             # 每组视频数
         self.media_order = ORDER_VIDEOS_FIRST
+        self.capture_segments = []
+        self.selection_start = 1
+        self.selection_end = None
+        self.all_groups = []
+        self._selected_processed_count = 0
         self.group_pattern_mismatch_count = 0
 
         # ===== 大目录后台扫描状态 =====
@@ -1890,6 +2404,18 @@ class WildCamSorter:
         self._progress_save_pending = None
         self._progress_save_thread = None
         self._jump_search_state = None
+
+        # ===== 无损快速分类队列 =====
+        # UI只负责冻结“用户当时看到的那一组”的快照并立即前进；复制、EXIF、CSV
+        # 全部由单一后台线程按点击顺序完成，避免重复点击造成跳组或记录丢失。
+        self._classify_queue = queue.Queue()
+        self._classify_result_queue = queue.Queue()
+        self._pending_group_indices = set()
+        self._classify_poll_after_id = None
+        self._classify_worker_thread = threading.Thread(
+            target=self._classification_worker, daemon=True
+        )
+        self._classify_worker_thread.start()
         
         # ===== 视频播放状态 =====
         self.video_cap = None             # cv2.VideoCapture 对象（解码线程内使用）
@@ -1901,11 +2427,19 @@ class WildCamSorter:
         self._video_thread = None         # 视频解码线程
         self._video_queue = None          # 帧队列（解码线程→UI线程）
         self._video_stop = None           # 停止事件
+        self._video_generation = 0        # 防止已切组的旧线程向新面板写帧
+        self._retired_video_threads = []  # 仍在退出的慢解码器（限制并发防资源耗尽）
         
         # ===== UI 状态 =====
         self._panels = []                 # MediaPanel 列表（4个）
         self._resize_after_id = None      # 窗口调整大小时的防抖 ID
         self._panels_ready = False        # 面板是否已完成首次渲染
+        self._preview_generation = 0
+        self._preview_queue = queue.Queue(maxsize=64)
+        self._preview_result_queue = queue.Queue()
+        self._preview_poll_after_id = None
+        for _ in range(2):
+            threading.Thread(target=self._preview_worker, daemon=True).start()
         
         # ===== 日志系统 =====
         self.logger = None
@@ -1913,8 +2447,15 @@ class WildCamSorter:
         
         # ===== 创建主窗口 =====
         self.root = tk.Tk()
-        self.root.title("WildCam Sorter - 野外相机数据分类工具")
-        self.root.geometry("1800x1000")    # 默认窗口大小
+        self.root.title(f"WildCam Sorter v{APP_VERSION} - 野外相机数据分类工具")
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        main_w = min(1800, max(1000, screen_w - 40))
+        main_h = min(1000, max(700, screen_h - 80))
+        self.root.geometry(
+            f"{main_w}x{main_h}+{max(0, (screen_w-main_w)//2)}+"
+            f"{max(0, (screen_h-main_h)//2 - 10)}"
+        )
         self.root.configure(bg=COLOR_BG)
         self.root.minsize(1000, 700)
         
@@ -1934,6 +2475,9 @@ class WildCamSorter:
         self._setup_display_area()
         self._setup_control_area()
         self._setup_statusbar()
+        if hasattr(self, 'settings'):
+            self._apply_theme(self.settings.get('theme', 'system'), persist=False)
+        self.root.after(5000, self._poll_system_theme)
         
         # ===== 绑定键盘事件 =====
         self._bind_keys()
@@ -1964,28 +2508,21 @@ class WildCamSorter:
         )
         self.btn_open.pack(side=tk.LEFT, padx=8, pady=3)
         
-        # 目标文件夹按钮
-        self.btn_target = tk.Button(
-            toolbar, text="📤 输出到", font=("微软雅黑", 10),
-            bg='#555555', fg='white', activebackground='#777777',
-            relief=tk.FLAT, cursor='hand2',
-            command=self._prompt_target_folder, padx=10, pady=3
-        )
-        self.btn_target.pack(side=tk.LEFT, padx=3, pady=3)
-        
-        # 目标文件夹路径显示
-        self.label_target = tk.Label(
-            toolbar, text="", font=("微软雅黑", 10),
-            bg=COLOR_TOOLBAR, fg='#888888', anchor=tk.W
-        )
-        self.label_target.pack(side=tk.LEFT, padx=3, pady=3)
-        
         # 文件夹路径显示
         self.label_folder = tk.Label(
             toolbar, text="未打开文件夹", font=("微软雅黑", 10),
             bg=COLOR_TOOLBAR, fg='#AAAAAA', anchor=tk.W
         )
         self.label_folder.pack(side=tk.LEFT, padx=10, pady=3, fill=tk.X, expand=True)
+
+        # 系统设置独立放在右上角；路径与模式仍保留在左上角。
+        self.btn_settings = tk.Button(
+            toolbar, text="⚙", font=("微软雅黑", 12),
+            bg='#455A64', fg='white', activebackground='#607D8B',
+            relief=tk.FLAT, cursor='hand2', command=self._show_settings,
+            padx=9, pady=2
+        )
+        self.btn_settings.pack(side=tk.RIGHT, padx=(3, 8), pady=3)
 
         # 当前拍摄模式（右侧常驻显示，方便核对分组设置）
         self.label_capture_mode = tk.Label(
@@ -2006,10 +2543,127 @@ class WildCamSorter:
         """在工具栏显示当前拍摄模式。"""
         if not hasattr(self, 'label_capture_mode'):
             return
-        order_text = ORDER_DISPLAY_NAMES.get(self.media_order, '未设置')
-        self.label_capture_mode.config(
-            text=f"模式：{self.photo_count}照片 + {self.video_count}视频｜{order_text}"
-        )
+        if len(self.capture_segments) > 1:
+            self.label_capture_mode.config(text=f"模式：分段模式（{len(self.capture_segments)} 段）")
+        else:
+            order_text = ORDER_DISPLAY_NAMES.get(self.media_order, '未设置')
+            self.label_capture_mode.config(
+                text=f"模式：{self.photo_count}照片 + {self.video_count}视频｜{order_text}"
+            )
+
+    def _resolved_theme(self, mode: str) -> str:
+        if mode == 'system':
+            return 'dark' if system_uses_dark_theme() else 'light'
+        return mode if mode in ('light', 'dark') else 'dark'
+
+    def _apply_theme(self, mode: str, persist: bool = True):
+        """即时切换现有Tk控件颜色，并保存用户选择。"""
+        resolved = self._resolved_theme(mode)
+        reverse = {value.upper(): key for key, value in THEME_DARK_TO_LIGHT.items()}
+        forward = {key.upper(): value for key, value in THEME_DARK_TO_LIGHT.items()}
+
+        def convert(value):
+            key = str(value).upper()
+            dark = reverse.get(key, key)
+            return forward.get(dark, value) if resolved == 'light' else dark
+
+        def visit(widget):
+            for option in ('background', 'foreground', 'activebackground',
+                           'activeforeground', 'highlightbackground'):
+                try:
+                    current = widget.cget(option)
+                    converted = convert(current)
+                    if converted != current:
+                        widget.configure(**{option: converted})
+                except (tk.TclError, AttributeError):
+                    pass
+            for child in widget.winfo_children():
+                visit(child)
+
+        visit(self.root)
+        self._active_theme = resolved
+        self.settings['theme'] = mode
+        if persist:
+            try:
+                save_app_settings(self.settings)
+            except OSError as exc:
+                self._log(f"无法保存设置: {exc}", 'warning')
+
+    def _poll_system_theme(self):
+        if self._closing:
+            return
+        if self.settings.get('theme') == 'system':
+            resolved = self._resolved_theme('system')
+            if resolved != self._active_theme:
+                self._apply_theme('system', persist=False)
+        self.root.after(5000, self._poll_system_theme)
+
+    def _show_settings(self):
+        window = tk.Toplevel(self.root)
+        window.title("系统设置")
+        window.geometry("520x330")
+        window.transient(self.root)
+        window.configure(bg=COLOR_BG)
+        tk.Label(window, text="⚙ 系统设置", font=("微软雅黑", 15, "bold"),
+                 bg=COLOR_BG, fg=COLOR_TEXT).pack(pady=(18, 14))
+        theme_row = tk.Frame(window, bg=COLOR_BG)
+        theme_row.pack(fill=tk.X, padx=35, pady=8)
+        tk.Label(theme_row, text="主题", width=10, anchor='w',
+                 bg=COLOR_BG, fg=COLOR_TEXT).pack(side=tk.LEFT)
+        display_to_key = {v: k for k, v in THEME_DISPLAY_NAMES.items()}
+        theme_var = tk.StringVar(value=THEME_DISPLAY_NAMES.get(
+            self.settings.get('theme', 'system'), THEME_DISPLAY_NAMES['system']))
+        combo = ttk.Combobox(theme_row, textvariable=theme_var,
+                             values=list(THEME_DISPLAY_NAMES.values()),
+                             state='readonly', width=18)
+        combo.pack(side=tk.LEFT)
+        combo.bind('<<ComboboxSelected>>', lambda _event: self._apply_theme(
+            display_to_key[theme_var.get()]
+        ))
+
+        info = tk.LabelFrame(window, text=" 帮助 ", bg=COLOR_BG, fg=COLOR_TEXT,
+                             padx=12, pady=12)
+        info.pack(fill=tk.X, padx=35, pady=15)
+        tk.Button(info, text="教程（README）", command=self._show_tutorial,
+                  bg='#1565C0', fg='white', relief=tk.FLAT, padx=12).pack(
+                      side=tk.LEFT, padx=5)
+        tk.Button(info, text="关于", command=lambda: messagebox.showinfo(
+            "关于", f"WildCam Sorter v{APP_VERSION}\n野外相机照片/视频分类工具",
+            parent=window), bg='#455A64', fg='white', relief=tk.FLAT,
+            padx=12).pack(side=tk.LEFT, padx=5)
+        tk.Button(info, text="联系作者", command=lambda: messagebox.showinfo(
+            "联系作者", "作者：S-Y-Chu\n邮箱：siyuanzhu.cn@gmail.com",
+            parent=window), bg='#455A64', fg='white', relief=tk.FLAT,
+            padx=12).pack(side=tk.LEFT, padx=5)
+        tk.Label(window,
+                 text="性能设置已自动优化：后台缩略图、延迟视频解码、串行无损分类队列。",
+                 bg=COLOR_BG, fg=COLOR_TEXT_DIM, wraplength=440).pack(pady=8)
+        self._apply_theme(self.settings.get('theme', 'system'), persist=False)
+
+    def _show_tutorial(self):
+        window = tk.Toplevel(self.root)
+        window.title("使用教程")
+        window.geometry("900x700")
+        text_widget = tk.Text(window, wrap=tk.WORD, padx=16, pady=14)
+        scrollbar = tk.Scrollbar(window, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        candidates = [
+            os.path.join(getattr(sys, '_MEIPASS', ''), 'README.md'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'README.md'),
+        ]
+        content = "WildCam Sorter 使用教程\n\nREADME.md 未找到，请确认压缩包已完整解压。"
+        for path in candidates:
+            if path and os.path.isfile(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as handle:
+                        content = handle.read()
+                    break
+                except OSError:
+                    pass
+        text_widget.insert('1.0', content)
+        text_widget.configure(state=tk.DISABLED)
     
     # ==================== UI：显示区 ====================
     
@@ -2166,7 +2820,7 @@ class WildCamSorter:
     
     def _setup_statusbar(self):
         """构建底部状态栏（进度条 + 状态文字）"""
-        self.status_frame = tk.Frame(self.root, bg=COLOR_TOOLBAR, height=28)
+        self.status_frame = tk.Frame(self.root, bg=COLOR_TOOLBAR, height=38)
         self.status_frame.grid(row=3, column=0, sticky='ew')
         self.status_frame.grid_propagate(False)
         
@@ -2177,6 +2831,12 @@ class WildCamSorter:
         )
         self.progress_canvas.pack(fill=tk.X)
         
+        self.label_remaining = tk.Label(
+            self.status_frame, text="", font=("微软雅黑", 8),
+            bg=COLOR_TOOLBAR, fg='#AAAAAA', anchor=tk.W, justify=tk.LEFT
+        )
+        self.label_remaining.pack(side=tk.LEFT, padx=(10, 18))
+
         # 状态文字
         self.label_status = tk.Label(
             self.status_frame, text="就绪", font=("微软雅黑", 8),
@@ -2200,7 +2860,8 @@ class WildCamSorter:
     # ==================== 数据初始化 ====================
     
     def _start_background_load(self, source_dir: str, target_dir: str,
-                               photo_count=None, video_count=None, media_order=None):
+                               photo_count=None, video_count=None, media_order=None,
+                               segments=None, selection_start=1, selection_end=None):
         """在工作线程中扫描输入、进度和已有分类，保证Tk主线程不被大目录阻塞。"""
         self._stop_video()
         self._jump_search_state = None
@@ -2216,7 +2877,6 @@ class WildCamSorter:
         self._scan_queue = queue.Queue()
         self._scan_dialog = ScanProgressDialog(self.root, self._cancel_background_scan)
         self.btn_open.config(state=tk.DISABLED)
-        self.btn_target.config(state=tk.DISABLED)
         self.label_status.config(text="正在后台读取数据，可随时取消…", fg='#80CBC4')
 
         source_dir = os.path.abspath(source_dir)
@@ -2224,6 +2884,10 @@ class WildCamSorter:
         photo_count = self.photo_count if photo_count is None else photo_count
         video_count = self.video_count if video_count is None else video_count
         media_order = self.media_order if media_order is None else media_order
+        segments = segments or [{
+            'start': 1, 'end': None, 'photo_count': photo_count,
+            'video_count': video_count, 'order': media_order,
+        }]
 
         def report(phase, visited, media_count):
             self._scan_queue.put((token, 'progress', phase, visited, media_count))
@@ -2231,42 +2895,48 @@ class WildCamSorter:
         def worker():
             try:
                 parent_dir = os.path.dirname(source_dir)
-                groups = scan_and_group_files(
+                scanned = scan_and_group_files(
                     source_dir, photo_count, video_count, media_order,
                     progress_callback=report, cancel_event=cancel_event
                 )
+                groups = RangedMediaGroupSequence(
+                    source_dir, scanned.file_names, segments,
+                    selection_start, selection_end
+                )
+                all_groups = groups.all_view()
                 if cancel_event.is_set():
                     raise ScanCancelled()
 
                 progress_file = os.path.join(parent_dir, '.wildcam_progress.json')
                 processed_groups, class_history = load_progress_snapshot(progress_file)
 
-                # 已有进度时只读取类别目录名，避免每次重启都遍历庞大的输出树。
-                if processed_groups:
-                    species_list = find_existing_species_folders(target_dir, source_dir)
-                    existing_files = {}
-                else:
-                    species_list, existing_files = scan_classified_media(
-                        target_dir, os.path.basename(source_dir), report, cancel_event
-                    )
+                # 每次都核对输出目录，才能发现其他人手工复制的新分类。
+                # 该扫描和CSV补写均在工作线程，不会冻住主窗口。
+                species_list, existing_files = scan_classified_media(
+                    target_dir, os.path.basename(source_dir), report, cancel_event
+                )
+                backfilled_count = backfill_manual_csv(
+                    source_dir, target_dir, existing_files, report, cancel_event
+                )
 
                 processed_groups, class_history, newly_found = merge_presorted_progress(
-                    groups, parent_dir, target_dir, existing_files,
+                    all_groups, parent_dir, target_dir, existing_files,
                     processed_groups, class_history, report, cancel_event
                 )
 
                 mismatch_count = 0
                 first_unprocessed = 0
                 skipped_count = 0
+                selected_processed_count = 0
                 total_groups = len(groups)
-                expected_types = expected_capture_types(
-                    photo_count, video_count, media_order
-                )
                 for index in range(total_groups):
                     if index % 256 == 0 and cancel_event.is_set():
                         raise ScanCancelled()
-                    start = index * groups.group_size
-                    group_names = groups.file_names[start:start + groups.group_size]
+                    group_names = [os.path.basename(path) for path in groups[index]]
+                    mode = groups.mode_for_group(index)
+                    expected_types = expected_capture_types(
+                        mode['photo_count'], mode['video_count'], mode['order']
+                    )
                     actual_types = [
                         'video' if is_video_file(name) else 'image'
                         for name in group_names
@@ -2277,6 +2947,8 @@ class WildCamSorter:
                         os.path.join(source_dir, group_names[0]) if group_names else ''
                     )
                     rel_path = os.path.relpath(first_path, parent_dir) if first_path else ''
+                    if rel_path in processed_groups:
+                        selected_processed_count += 1
                     if skipped_count == index and rel_path in processed_groups:
                         skipped_count += 1
                     elif skipped_count == index:
@@ -2293,6 +2965,7 @@ class WildCamSorter:
                     'parent_dir': parent_dir,
                     'progress_file': progress_file,
                     'groups': groups,
+                    'all_groups': all_groups,
                     'processed_groups': processed_groups,
                     'class_history': class_history,
                     'species_list': species_list,
@@ -2300,9 +2973,14 @@ class WildCamSorter:
                     'first_unprocessed': first_unprocessed,
                     'skipped_count': skipped_count,
                     'newly_found': newly_found,
+                    'backfilled_count': backfilled_count,
+                    'selected_processed_count': selected_processed_count,
                     'photo_count': photo_count,
                     'video_count': video_count,
                     'media_order': media_order,
+                    'segments': groups.segments,
+                    'selection_start': groups.selection_start,
+                    'selection_end': groups.selection_end,
                 }
                 self._scan_queue.put((token, 'done', result))
             except ScanCancelled:
@@ -2332,7 +3010,6 @@ class WildCamSorter:
             self._scan_dialog.close()
             self._scan_dialog = None
         self.btn_open.config(state=tk.NORMAL)
-        self.btn_target.config(state=tk.NORMAL)
 
     def _poll_background_scan(self):
         """只在Tk主线程消费工作线程消息并更新界面。"""
@@ -2394,15 +3071,19 @@ class WildCamSorter:
         self.media_order = result['media_order']
         self.progress_file = result['progress_file']
         self.groups = result['groups']
+        self.all_groups = result['all_groups']
+        self.capture_segments = result['segments']
+        self.selection_start = result['selection_start']
+        self.selection_end = result['selection_end']
         self.processed_groups = result['processed_groups']
         self.class_history = result['class_history']
         self.species_list = result['species_list']
         self.group_pattern_mismatch_count = result['mismatch_count']
+        self._selected_processed_count = result['selected_processed_count']
         self.current_group_index = -1
         self._panels_ready = False
 
         self.label_folder.config(text=f"📁 {self.source_dir}")
-        self.label_target.config(text=f"📤 输出到: {self.target_dir}")
         self._update_capture_mode_label()
         self._rebuild_species_buttons()
         self._log(f"打开文件夹: {self.source_dir}")
@@ -2417,7 +3098,8 @@ class WildCamSorter:
             return
 
         self.label_stats.config(
-            text=f"共 {len(self.groups):,} 组 / {self.groups.total_files:,} 个文件"
+            text=(f"文件夹共 {len(self.all_groups):,} 组 / {len(self.groups.file_names):,} 个文件"
+                  f"｜已选 {len(self.groups):,} 组 / {self.groups.total_files:,} 个文件")
         )
         mismatch_count = self.group_pattern_mismatch_count
         if mismatch_count:
@@ -2432,6 +3114,8 @@ class WildCamSorter:
         if newly_found:
             self._save_progress()
             self._log(f"检测到 {newly_found} 组已手动分好，自动跳过")
+        if result.get('backfilled_count'):
+            self._log(f"为人工分类补写了 {result['backfilled_count']} 行CSV记录")
 
         self.root.after(
             150,
@@ -2445,20 +3129,32 @@ class WildCamSorter:
         弹出路径选择对话框：一个窗口内同时选择输入和输出文件夹。
         确定后完成初始化，取消则保持空状态（可用工具栏按钮随时开始）。
         """
+        if self._pending_group_indices:
+            messagebox.showinfo(
+                "请稍候",
+                f"后台仍在保存 {len(self._pending_group_indices)} 组分类。\n"
+                "保存完成后再切换路径，可保证记录不会写错文件夹。",
+                parent=self.root
+            )
+            return
         dlg = PathSelectDialog(
             self.root,
             initial_input=self._pending_input or self.source_dir or "",
             initial_output=self.target_dir or "",
             initial_photo_count=self.photo_count,
             initial_video_count=self.video_count,
-            initial_order=self.media_order
+            initial_order=self.media_order,
+            initial_segments=self.capture_segments or None,
+            initial_selection=(self.selection_start, self.selection_end)
         )
         self.root.wait_window(dlg.window)  # 阻塞直到对话框关闭
         
         if dlg.result:
-            in_path, out_path, photo_count, video_count, media_order = dlg.result
+            in_path, out_path, segments, selection_start, selection_end = dlg.result
+            first = segments[0]
             self._start_background_load(
-                in_path, out_path, photo_count, video_count, media_order
+                in_path, out_path, first['photo_count'], first['video_count'],
+                first['order'], segments, selection_start, selection_end
             )
         else:
             # 用户取消：保持空状态，提示可用工具栏按钮
@@ -2485,18 +3181,8 @@ class WildCamSorter:
         self._show_path_dialog()
     
     def _prompt_target_folder(self):
-        """弹出输出文件夹选择对话框（分类结果输出位置）"""
-        initial = self.target_dir if self.target_dir else os.path.expanduser("~")
-        folder = filedialog.askdirectory(
-            title="选择分类结果的输出文件夹",
-            initialdir=initial
-        )
-        if folder:
-            if self.source_dir:
-                self._start_background_load(self.source_dir, folder)
-            else:
-                self.target_dir = os.path.abspath(folder)
-                self.label_target.config(text=f"📤 输出到: {self.target_dir}")
+        """兼容旧调用：输出路径统一由“路径与模式”设置页管理。"""
+        self._show_path_dialog()
     
     def _scan_species_folders(self):
         """扫描输出文件夹中已有的物种文件夹并重建按钮（类别只来自输出目录）"""
@@ -2648,9 +3334,23 @@ class WildCamSorter:
         
         # 停止旧视频
         self._stop_video()
+        self._preview_generation += 1
+        preview_generation = self._preview_generation
+        try:
+            while True:
+                self._preview_queue.get_nowait()
+        except queue.Empty:
+            pass
         
         self.current_group_index = group_index
         self.current_group_files = self.groups[group_index]
+        if hasattr(self.groups, 'mode_for_group'):
+            mode = self.groups.mode_for_group(group_index)
+            if mode:
+                self.label_capture_mode.config(
+                    text=(f"当前模式：{mode['photo_count']}照片 + {mode['video_count']}视频｜"
+                          f"{ORDER_DISPLAY_NAMES.get(mode['order'], '')}")
+                )
         
         # 重置选中状态（默认全选，长度=实际文件数）
         self.selected_flags = [True] * len(self.current_group_files)
@@ -2678,7 +3378,8 @@ class WildCamSorter:
         if is_processed and rel_path in self.class_history:
             prev_species = self.class_history[rel_path].get('species', '')
         
-        # 遍历4个主面板。视频可出现在任意位置；只自动播放第一个视频。
+        # 先瞬间切换全部面板身份，再由后台线程解码缩略图。这样大图和慢视频
+        # 不会阻塞分类按钮；只有用户在本组停留片刻时才启动实时视频。
         video_started = False
         for panel_idx in range(4):
             panel = self._panels[panel_idx]
@@ -2688,15 +3389,15 @@ class WildCamSorter:
                 filename = os.path.basename(file_path)
                 panel.label_text = self._media_label_for_index(panel_idx)
 
+                panel.display_loading(file_path, panel.label_text)
+                self._queue_preview(panel, file_path, preview_generation)
                 if is_video_file(filename) and not video_started:
-                    panel.file_path = file_path
-                    panel.title_label.config(text=f"{panel.label_text} | {filename}")
-                    self._load_video(file_path, panel)
                     video_started = True
-                elif is_video_file(filename):
-                    panel.display_video_thumbnail(file_path)
-                else:
-                    panel.display_image(file_path)
+                    self.root.after(
+                        300,
+                        lambda g=preview_generation, p=file_path, target=panel:
+                        self._start_video_if_current(g, p, target)
+                    )
             else:
                 panel.label_text = f"媒体 {panel_idx + 1}"
                 panel.display_placeholder()
@@ -2728,15 +3429,15 @@ class WildCamSorter:
                 op.set_fullscreen_callback(self._open_fullscreen)
                 op.set_refresh_callback(self._on_panel_refresh)
                 op.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
+                op.display_loading(file_path, op.label_text)
+                self._queue_preview(op, file_path, preview_generation)
                 if is_video_file(os.path.basename(file_path)) and not video_started:
-                    op.file_path = file_path
-                    op.title_label.config(text=f"{op.label_text} | {os.path.basename(file_path)}")
-                    self._load_video(file_path, op)
                     video_started = True
-                elif is_video_file(os.path.basename(file_path)):
-                    op.display_video_thumbnail(file_path)
-                else:
-                    op.display_image(file_path)
+                    self.root.after(
+                        300,
+                        lambda g=preview_generation, p=file_path, target=op:
+                        self._start_video_if_current(g, p, target)
+                    )
                 op.set_selected(self.selected_flags[file_idx])
                 self.overflow_panels.append(op)
         else:
@@ -2775,6 +3476,97 @@ class WildCamSorter:
         
         self._update_progress_bar()
         self._update_status()
+
+    def _queue_preview(self, panel: MediaPanel, file_path: str, generation: int):
+        """提交一个可丢弃的缩略图任务；队列满时优先保证界面响应。"""
+        width, height = panel._calc_display_size()
+        job = (generation, panel.index, file_path, max(width, 320), max(height, 200))
+        try:
+            self._preview_queue.put_nowait(job)
+        except queue.Full:
+            try:
+                self._preview_queue.get_nowait()
+                self._preview_queue.put_nowait(job)
+            except queue.Empty:
+                pass
+        if self._preview_poll_after_id is None:
+            self._preview_poll_after_id = self.root.after(20, self._poll_preview_results)
+
+    def _preview_worker(self):
+        """在后台读取、旋转和缩放图片/视频首帧。"""
+        while True:
+            generation, panel_index, file_path, width, height = self._preview_queue.get()
+            if generation != self._preview_generation:
+                continue
+            image = None
+            error = None
+            cap = None
+            try:
+                if is_video_file(os.path.basename(file_path)):
+                    cap = open_video_capture(file_path)
+                    if cap is None:
+                        raise OSError('无法读取视频首帧')
+                    ok, frame = cap.read()
+                    if not ok:
+                        raise OSError('无法读取视频首帧')
+                    image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                else:
+                    with Image.open(file_path) as source:
+                        source.load()
+                        image = ImageOps.exif_transpose(source).copy()
+                image.thumbnail((width, height), Image.Resampling.LANCZOS)
+            except Exception as exc:
+                error = str(exc)
+                image = None
+            finally:
+                if cap is not None:
+                    cap.release()
+            self._preview_result_queue.put(
+                (generation, panel_index, file_path, image, error)
+            )
+
+    def _panel_for_index(self, panel_index: int):
+        if panel_index < 4:
+            return self._panels[panel_index]
+        extra = panel_index - 4
+        return self.overflow_panels[extra] if extra < len(self.overflow_panels) else None
+
+    def _poll_preview_results(self):
+        """只显示当前组结果，过时任务直接释放，避免高速浏览时回闪。"""
+        self._preview_poll_after_id = None
+        try:
+            while True:
+                generation, panel_index, file_path, image, error = (
+                    self._preview_result_queue.get_nowait()
+                )
+                if generation != self._preview_generation:
+                    continue
+                panel = self._panel_for_index(panel_index)
+                if panel is None or panel.file_path != file_path:
+                    continue
+                if image is None:
+                    kind = '视频' if is_video_file(os.path.basename(file_path)) else '图片'
+                    panel.media_label.config(image='', text=f"⚠ 无法预览{kind}")
+                else:
+                    photo = ImageTk.PhotoImage(image)
+                    panel._photo = photo
+                    panel.media_label.config(image=photo, text='')
+        except queue.Empty:
+            pass
+        if (not self._preview_queue.empty() or not self._preview_result_queue.empty()) \
+                and not self._closing:
+            self._preview_poll_after_id = self.root.after(20, self._poll_preview_results)
+
+    def _start_video_if_current(self, generation: int, file_path: str,
+                                panel: MediaPanel):
+        """用户确实停留在该组时才开实时解码，快速掠过的组只加载首帧。"""
+        self._retired_video_threads = [
+            thread for thread in self._retired_video_threads if thread.is_alive()
+        ]
+        if (generation == self._preview_generation
+                and panel.file_path == file_path and not self._closing
+                and len(self._retired_video_threads) < 2):
+            self._load_video(file_path, panel)
     
     # ==================== 视频播放 ====================
     
@@ -2795,11 +3587,15 @@ class WildCamSorter:
         self._cached_video_dims = (0, 0)
         
         # 启动解码线程（daemon线程，解码卡住也不影响UI）
+        self._video_generation += 1
+        generation = self._video_generation
         self._video_stop = threading.Event()
         self._video_queue = queue.Queue(maxsize=2)
+        stop_event = self._video_stop
+        frame_queue = self._video_queue
         self._video_thread = threading.Thread(
             target=self._video_decode_worker,
-            args=(video_path,),
+            args=(video_path, stop_event, frame_queue, generation),
             daemon=True
         )
         self._video_thread.start()
@@ -2808,7 +3604,8 @@ class WildCamSorter:
         self.video_frame_delay = 50  # 20fps显示
         self._update_video_frame()
     
-    def _video_decode_worker(self, video_path: str):
+    def _video_decode_worker(self, video_path: str, stop_event: threading.Event,
+                             frame_queue: queue.Queue, generation: int):
         """
         视频解码线程：持续读帧转RGB放入队列，循环播放。
         所有可能阻塞的解码操作都在此线程，UI线程只消费队列。
@@ -2848,12 +3645,14 @@ class WildCamSorter:
             source = cap if (cap and cap.isOpened()) else av_container
             if source is None:
                 # 全部失败：通知UI显示错误
-                self.root.after(0, lambda: self._video_load_failed(video_path))
+                self.root.after(
+                    0, lambda: self._video_load_failed(video_path, generation)
+                )
                 return
             
             # ---- 解码循环 ----
             fail_count = 0  # 连续读取失败计数，防止死循环
-            while not self._video_stop.is_set():
+            while not stop_event.is_set():
                 frame = None
                 if cap is not None and cap.isOpened():
                     # 跳帧：连读最多3帧取最新，避免解码慢于显示时堆积
@@ -2901,11 +3700,11 @@ class WildCamSorter:
                 
                 # 放入队列（满则丢弃最旧帧，保证队列不阻塞线程）
                 try:
-                    self._video_queue.put_nowait(frame_rgb)
+                    frame_queue.put_nowait(frame_rgb)
                 except queue.Full:
                     try:
-                        self._video_queue.get_nowait()
-                        self._video_queue.put_nowait(frame_rgb)
+                        frame_queue.get_nowait()
+                        frame_queue.put_nowait(frame_rgb)
                     except Exception:
                         pass
         except Exception:
@@ -2922,9 +3721,10 @@ class WildCamSorter:
                 except Exception:
                     pass
     
-    def _video_load_failed(self, video_path: str):
+    def _video_load_failed(self, video_path: str, generation: int = None):
         """视频完全无法打开时显示错误提示"""
-        if not self.video_playing:
+        if (not self.video_playing
+                or (generation is not None and generation != self._video_generation)):
             return
         ext = os.path.splitext(video_path)[1].lower()
         self._log(f"无法播放视频: {video_path}", 'warning')
@@ -2997,17 +3797,20 @@ class WildCamSorter:
                 self.video_after_id = None
     
     def _stop_video(self):
-        """停止视频播放，结束解码线程并释放资源"""
+        """停止视频播放；只发退出信号，不在UI线程等待慢速解码器。"""
         self.video_playing = False
+        self._video_generation += 1
         if self.video_after_id:
             self.root.after_cancel(self.video_after_id)
             self.video_after_id = None
-        # 通知解码线程退出并等待（超时2秒，避免阻塞UI）
+        # 解码线程是daemon且持有自己的Event/Queue。某些损坏视频的read()会阻塞，
+        # 因此这里绝不能join，否则每次切组都可能卡住整整2秒。
         if self._video_stop is not None:
             self._video_stop.set()
-        if hasattr(self, '_video_thread') and self._video_thread is not None:
-            self._video_thread.join(timeout=2)
-            self._video_thread = None
+        if self._video_thread is not None and self._video_thread.is_alive():
+            self._retired_video_threads.append(self._video_thread)
+        self._video_thread = None
+        self._video_stop = None
         # 清空队列
         if hasattr(self, '_video_queue'):
             try:
@@ -3078,6 +3881,8 @@ class WildCamSorter:
         
         # 创建并打开全分辨率查看器（模态窗口，阻塞直到关闭）
         viewer = FullScreenViewer(self.root, file_path, is_video=is_video)
+        if hasattr(self, 'settings'):
+            self._apply_theme(self.settings.get('theme', 'system'), persist=False)
         # 等待查看器窗口关闭
         self.root.wait_window(viewer.window)
         
@@ -3136,9 +3941,10 @@ class WildCamSorter:
             if not self.current_group_files:
                 return
             selected_count = len(self.multi_selected)
-            # 对每个选中的物种执行分类（不自动跳组，最后统一跳）
-            for species in list(self.multi_selected):
-                self._classify_files(target_species=species, auto_advance=False)
+            # 一个事务同时写入多个类别，避免旧实现重复撤销同一组。
+            self._classify_files(
+                target_species=tuple(sorted(self.multi_selected, key=natural_sort_key))
+            )
             # 退出多类模式
             self.multi_mode = False
             self.multi_selected.clear()
@@ -3147,8 +3953,6 @@ class WildCamSorter:
             self.label_status.config(
                 text=f"✅ 已分类到 {selected_count} 个类别", fg='#4CAF50'
             )
-            # 分类完成后自动进入下一组
-            self.root.after(300, self._auto_advance)
         else:
             # 进入多类模式
             self.multi_mode = True
@@ -3218,6 +4022,9 @@ class WildCamSorter:
         
         所有操作都是复制（shutil.copy2），原始文件保留不动。
         """
+        if self._scan_thread is not None and self._scan_thread.is_alive():
+            self.label_status.config(text="正在切换数据文件夹，请等待扫描完成", fg='#FFB74D')
+            return
         if not self.current_group_files or not self.target_dir:
             self.label_status.config(
                 text="⚠ 错误：未加载数据或未设置目标文件夹",
@@ -3225,180 +4032,234 @@ class WildCamSorter:
             )
             return
         
-        try:
-            self._do_classify(target_species, auto_advance)
-        except Exception as e:
-            self._log(f"分类失败: {e}\n{traceback.format_exc()}", 'error')
-            self.label_status.config(
-                text=f"❌ 分类失败: {e}",
-                fg='#FF6B6B'
-            )
-            import traceback
-            traceback.print_exc()
-    
-    def _do_classify(self, target_species: str = None, auto_advance: bool = True):
-        rel_path = self._get_group_rel_path()
-        was_reclassification = bool(rel_path and rel_path in self.processed_groups)
-        if was_reclassification:
-            undone = self._undo_group_copies(self.current_group_index)
-            if undone > 0:
-                self.label_status.config(
-                    text=f"🗑 已删除旧分类的 {undone} 个文件，正在重新分类...",
-                    fg='#FFB74D'
-                )
-                self.root.update_idletasks()  # 立即刷新UI
-        
-        # ---- 执行新的分类复制 ----
-        empty_dir = os.path.join(self.target_dir, "空拍")
-        species_dir = os.path.join(self.target_dir, target_species) if target_species else None
-        
-        # 确保目标文件夹存在
-        os.makedirs(empty_dir, exist_ok=True)
-        if species_dir:
-            os.makedirs(species_dir, exist_ok=True)
-        
-        # ---- 磁盘空间预检 ----
-        try:
-            # 计算当前组文件总大小
-            group_size = sum(os.path.getsize(f) for f in self.current_group_files)
-            # 输出文件夹所在磁盘的剩余空间
-            free_space = shutil.disk_usage(self.target_dir).free
-            if free_space < group_size:
-                self._log(f"磁盘空间不足: 需要约{group_size/1024/1024:.1f}MB, 剩余{free_space/1024/1024:.1f}MB", 'warning')
-                messagebox.showwarning(
-                    "⚠ 磁盘空间可能不足",
-                    f"输出文件夹所在磁盘剩余空间约 {free_space/1024/1024:.0f} MB，\n"
-                    f"当前组文件约需 {group_size/1024/1024:.0f} MB。\n\n"
-                    f"建议清理磁盘空间，或点击「📤 输出到」换一个输出位置。"
-                )
-        except OSError:
-            pass  # 预检失败不影响复制（复制时仍会逐文件报错）
-        
-        copied_species = 0
-        copied_empty = 0
-        errors = []
-        dest_files_record = []  # 记录所有复制到的目标路径（用于后续撤销）
-        
-        for i, file_path in enumerate(self.current_group_files):
-            # 确定该文件的目标文件夹列表（标签优先）
-            dest_dirs = []
-            label = self.per_file_species.get(i)  # 迷你栏打上的标签
-            is_selected = (i < len(self.selected_flags) and self.selected_flags[i])
-            
-            if label:
-                # 有标签 → 按标签去对应文件夹（标签优先于主按钮）
-                for sp in label:
-                    sp_dir = os.path.join(self.target_dir, sp)
-                    os.makedirs(sp_dir, exist_ok=True)
-                    dest_dirs.append(sp_dir)
-            elif target_species is None:
-                # 主按钮是空拍 + 无标签 → 空拍
-                dest_dirs.append(empty_dir)
-            elif is_selected:
-                # 无标签 + 选中 → 跟随主按钮类别
-                dest_dirs.append(species_dir)
-            else:
-                # 无标签 + 取消选中 → 空拍
-                dest_dirs.append(empty_dir)
-            
-            filename = os.path.basename(file_path)
-            
-            for dest_dir in dest_dirs:
-                dest_path = os.path.join(dest_dir, filename)
-                
-                try:
-                    if os.path.exists(dest_path):
-                        base, ext = os.path.splitext(filename)
-                        counter = 1
-                        while os.path.exists(os.path.join(dest_dir, f"{base}_{counter}{ext}")):
-                            counter += 1
-                        dest_path = os.path.join(dest_dir, f"{base}_{counter}{ext}")
-                    
-                    shutil.copy2(file_path, dest_path)
-                    dest_files_record.append(dest_path)
-                    
-                    if dest_dir == species_dir:
-                        copied_species += 1
-                    elif dest_dir == empty_dir:
-                        copied_empty += 1
-                        
-                except Exception as e:
-                    # 记录错误详情（区分磁盘满等严重错误）
-                    err_msg = str(e)
-                    errors.append(f"  {filename}: {err_msg}")
-                    self._log(f"复制失败 {filename}: {err_msg}", 'error')
-        
-        # 标记为已处理（带分类详情）
-        self._mark_group_processed(
-            self.current_group_index,
-            species=target_species,
-            dest_files=dest_files_record
+        group_index = self.current_group_index
+        if group_index in self._pending_group_indices:
+            return
+        rel_path = self._get_group_rel_path(group_index)
+        categories = () if target_species is None else (
+            tuple(target_species) if isinstance(target_species, (tuple, list, set))
+            else (target_species,)
         )
-        
-        # 日志记录
-        species_label = target_species if target_species else "空拍"
-        self._log(f"分类 第{self.current_group_index+1}组 → 「{species_label}」: 物种{copied_species}个, 空拍{copied_empty}个" + 
-                  (f", 错误{len(errors)}个" if errors else ""))
-        if errors:
-            self._log(f"分类错误详情: {errors}", 'warning')
-        
-        # ---- CSV记录（所有分类均记录：空拍 + 物种）----
-        self._write_csv_record(target_species, replace_existing=was_reclassification)
-        
-        # 状态栏反馈
-        parts = []
-        if target_species:
-            parts.append(f"✅「{target_species}」{copied_species}个")
-        if copied_empty > 0:
-            parts.append(f"📭 空拍 {copied_empty}个")
-        if errors:
-            parts.append(f"⚠ 失败 {len(errors)}")
-        
+        job = {
+            'group_index': group_index,
+            'rel_path': rel_path,
+            'files': tuple(self.current_group_files),
+            'selected': tuple(self.selected_flags),
+            'per_file_species': {
+                index: tuple(sorted(values, key=natural_sort_key))
+                for index, values in self.per_file_species.items()
+            },
+            'categories': tuple(categories),
+            'target_dir': self.target_dir,
+            'point_name': os.path.basename(self.source_dir) if self.source_dir else '',
+            'old_dest_files': tuple(
+                self.class_history.get(rel_path, {}).get('dest_files', [])
+            ),
+            'replace_existing': rel_path in self.processed_groups,
+        }
+        self._pending_group_indices.add(group_index)
+        self._classify_queue.put(job)
+        self._log(
+            f"已排队分类第{group_index + 1}组 → "
+            f"{'、'.join(categories) if categories else '空拍'}"
+        )
         self.label_status.config(
-            text=" | ".join(parts),
-            fg='#4CAF50' if not errors else '#FF9800'
+            text=f"⏳ 第 {group_index + 1} 组已进入分类队列（队列 {self._classify_queue.qsize()}）",
+            fg='#80CBC4'
         )
-        
-        # 复制失败时弹窗提醒（磁盘满等严重错误不能只看状态栏）
-        if errors:
-            error_text = "\n".join(errors)
-            # 判断是否磁盘空间不足
-            is_disk_full = any(
-                ('空间' in e or 'No space' in e or 'ENOSPC' in e or '112' in e) for e in errors
-            )
-            if is_disk_full:
-                messagebox.showerror(
-                    "⚠ 输出文件夹空间不足",
-                    f"复制文件失败，输出文件夹所在磁盘空间可能已满！\n\n"
-                    f"请清理磁盘空间，或点击「📤 输出到」换一个输出位置。\n\n"
-                    f"失败详情：\n{error_text}"
-                )
-            else:
-                messagebox.showwarning(
-                    "复制部分文件失败",
-                    f"有 {len(errors)} 个文件复制失败：\n\n{error_text}\n\n"
-                    f"详细原因请查看日志文件 wildcam_sorter.log"
-                )
-        # 恢复组信息标签颜色（之前可能被设为黄色警告色）
-        self.label_group_info.config(
-            text=f"📦 第 {self.current_group_index + 1}/{len(self.groups)} 组",
-            fg=COLOR_TEXT
-        )
-        
-        self._update_progress_bar()
-        self._update_status()
-        
-        # 自动跳转下一组（多类模式循环时由外层统一调度）
+        self._schedule_classification_poll(1)
+
+        # 只允许一次点击推进一次；快点时下一次事件面对的必然是下一组。
         if auto_advance:
-            self.root.after(250, self._auto_advance)
+            self._auto_advance()
+
+    @staticmethod
+    def _job_species_for_file(job: dict, index: int) -> tuple:
+        labels = job['per_file_species'].get(index)
+        if labels:
+            return tuple(labels)
+        if not job['categories']:
+            return ('空拍',)
+        if index < len(job['selected']) and job['selected'][index]:
+            return tuple(job['categories'])
+        return ('空拍',)
+
+    def _classification_worker(self):
+        """严格按点击顺序执行复制和CSV事务，永不接触Tk控件。"""
+        while True:
+            job = self._classify_queue.get()
+            if job is None:
+                return
+            errors = []
+            dest_files = []
+            staged_files = []
+            copied_species = 0
+            copied_empty = 0
+            try:
+                old_paths = {os.path.abspath(path) for path in job['old_dest_files']}
+                for index, file_path in enumerate(job['files']):
+                    filename = os.path.basename(file_path)
+                    for category in self._job_species_for_file(job, index):
+                        dest_dir = os.path.join(job['target_dir'], category)
+                        try:
+                            os.makedirs(dest_dir, exist_ok=True)
+                            dest_path = os.path.join(dest_dir, filename)
+                            if (os.path.exists(dest_path)
+                                    and os.path.abspath(dest_path) not in old_paths):
+                                base, ext = os.path.splitext(filename)
+                                counter = 1
+                                while os.path.exists(
+                                        os.path.join(dest_dir, f"{base}_{counter}{ext}")):
+                                    counter += 1
+                                dest_path = os.path.join(dest_dir, f"{base}_{counter}{ext}")
+                            temp_path = (
+                                dest_path + f".wildcam-tmp-{threading.get_ident()}-{time.time_ns()}"
+                            )
+                            shutil.copy2(file_path, temp_path)
+                            staged_files.append((temp_path, dest_path))
+                            if category == '空拍':
+                                copied_empty += 1
+                            else:
+                                copied_species += 1
+                        except Exception as exc:
+                            errors.append(f"{filename}: {exc}")
+
+                if errors:
+                    raise OSError('本组有文件复制失败，已回滚，未写入分类记录')
+
+                # 所有源文件均已成功复制到临时文件后再提交，避免半组成功。
+                for temp_path, dest_path in staged_files:
+                    os.replace(temp_path, dest_path)
+                    dest_files.append(dest_path)
+                final_paths = {os.path.abspath(path) for path in dest_files}
+                for old_path in old_paths - final_paths:
+                    try:
+                        if os.path.isfile(old_path):
+                            os.remove(old_path)
+                    except OSError as exc:
+                        errors.append(f"删除旧分类 {os.path.basename(old_path)}: {exc}")
+                self._write_csv_snapshot(job)
+            except Exception as exc:
+                if str(exc) not in errors:
+                    errors.append(str(exc))
+                for temp_path, _dest_path in staged_files:
+                    try:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                    except OSError:
+                        pass
+                if not dest_files:
+                    copied_species = copied_empty = 0
+                self._log(f"后台分类失败: {exc}\n{traceback.format_exc()}", 'error')
+
+            species_label = '、'.join(job['categories']) if job['categories'] else '空拍'
+            self._classify_result_queue.put({
+                'job': job, 'errors': errors, 'dest_files': dest_files,
+                'copied_species': copied_species, 'copied_empty': copied_empty,
+                'species_label': species_label,
+            })
+
+    def _poll_classification_results(self):
+        """在主线程合并后台事务结果；一次轮询可消费多个高速点击。"""
+        self._classify_poll_after_id = None
+        if self._closing:
+            return
+        handled = False
+        try:
+            while True:
+                result = self._classify_result_queue.get_nowait()
+                handled = True
+                job = result['job']
+                index = job['group_index']
+                self._pending_group_indices.discard(index)
+                if result['dest_files'] and not result['errors']:
+                    if job['rel_path'] not in self.processed_groups:
+                        self._selected_processed_count += 1
+                    self.processed_groups.add(job['rel_path'])
+                    self.class_history[job['rel_path']] = {
+                        'species': result['species_label'],
+                        'dest_files': result['dest_files'],
+                    }
+                    self._save_progress()
+                self._log(
+                    f"分类完成 第{index + 1}组 → 「{result['species_label']}」: "
+                    f"物种{result['copied_species']}个, 空拍{result['copied_empty']}个, "
+                    f"错误{len(result['errors'])}个"
+                )
+                if result['errors']:
+                    self._log('分类错误详情: ' + ' | '.join(result['errors']), 'warning')
+                    self.label_status.config(
+                        text=f"⚠ 第 {index + 1} 组完成，但有 {len(result['errors'])} 个错误",
+                        fg='#FF9800'
+                    )
+                else:
+                    pending = len(self._pending_group_indices) + self._classify_queue.qsize()
+                    self.label_status.config(
+                        text=f"✅ 第 {index + 1} 组已完整记录"
+                             + (f"，后台队列尚有 {pending} 组" if pending else ''),
+                        fg='#4CAF50'
+                    )
+        except queue.Empty:
+            pass
+        if handled:
+            self._update_progress_bar()
+        if self._pending_group_indices or not self._classify_result_queue.empty():
+            self._schedule_classification_poll(40)
+
+    def _schedule_classification_poll(self, delay_ms: int = 40):
+        """确保任意时刻只有一个分类结果轮询，避免高速点击产生定时器风暴。"""
+        if self._classify_poll_after_id is None and not self._closing:
+            self._classify_poll_after_id = self.root.after(
+                delay_ms, self._poll_classification_results
+            )
     
     def _auto_advance(self):
         """分类完成后自动跳转到下一组"""
         if self.current_group_index + 1 < len(self.groups):
-            self._load_group(self.current_group_index + 1)
+            next_index = self.current_group_index + 1
+            current_mode = self.groups.mode_for_group(self.current_group_index)
+            next_mode = self.groups.mode_for_group(next_index)
+            if (current_mode and next_mode
+                    and current_mode.get('start') != next_mode.get('start')):
+                self.root.after(1, lambda: self._confirm_next_mode_range(next_index, next_mode))
+            else:
+                self._load_group(next_index)
         else:
             self.label_status.config(text="🎉 所有数据已处理完毕！", fg='#4CAF50')
             self.label_group_info.config(text="✨ 全部完成！")
+            if (hasattr(self.groups, 'file_names')
+                    and self.selection_end < len(self.groups.file_names)):
+                self.root.after(100, self._offer_next_selected_range)
+
+    def _confirm_next_mode_range(self, next_index: int, mode: dict):
+        """跨过模式边界时主动让用户核对下一段，避免按错相机模式。"""
+        if next_index != self.current_group_index + 1:
+            return
+        message = (
+            f"上一拍摄模式范围已完成。\n\n下一范围从文件序号 {mode['start']} 开始，"
+            f"模式为：{mode['photo_count']} 张照片 + {mode['video_count']} 个视频，"
+            f"{ORDER_DISPLAY_NAMES.get(mode['order'], '')}。\n\n"
+            "选择“是”按该模式继续；选择“否”返回“路径与模式”重新设置。"
+        )
+        if messagebox.askyesno("设置下一拍摄范围", message, parent=self.root):
+            self._load_group(next_index)
+        else:
+            self._show_path_dialog()
+
+    def _offer_next_selected_range(self):
+        """本次选中范围结束后，询问是否接着选择后续范围。"""
+        if self._pending_group_indices:
+            self.root.after(100, self._offer_next_selected_range)
+            return
+        start = self.selection_end + 1
+        if messagebox.askyesno(
+                "已完成选中范围",
+                f"文件序号 {self.selection_start}–{self.selection_end} 已处理完成。\n\n"
+                f"是否从第 {start} 个文件开始设置下一个范围及拍摄模式？",
+                parent=self.root):
+            self.selection_start = start
+            self.selection_end = None
+            self._show_path_dialog()
     
     def _csv_species_for_file(self, file_index: int, target_species: str = None) -> str:
         """返回单个文件最终进入的类别；多类别以中文分号合并在同一行。"""
@@ -3432,6 +4293,84 @@ class WildCamSorter:
             '拍摄时间': metadata['datetime'].strftime('%Y-%m-%d %H:%M:%S') if metadata['datetime'] else "",
             '点位名称': point_name,
         }
+
+    def _write_csv_snapshot(self, job: dict):
+        """使用分类点击瞬间的不可变快照写CSV，供后台分类线程调用。"""
+        files = job['files']
+        if not files:
+            return
+        empty_metadata = {
+            'longitude': None, 'latitude': None,
+            'altitude': None, 'datetime': None
+        }
+        metadata_by_file = {}
+        fallback_metadata = empty_metadata.copy()
+        for file_path in files:
+            metadata = extract_gps_from_file(file_path)
+            metadata_by_file[file_path] = metadata
+            for key in fallback_metadata:
+                if fallback_metadata[key] is None and metadata.get(key) is not None:
+                    fallback_metadata[key] = metadata[key]
+
+        new_rows = []
+        for index, file_path in enumerate(files):
+            metadata = self._merge_media_metadata(
+                metadata_by_file[file_path], fallback_metadata
+            )
+            species = '；'.join(self._job_species_for_file(job, index))
+            new_rows.append(self._csv_row(
+                file_path, metadata, species, job['point_name']
+            ))
+        self._replace_csv_rows(
+            os.path.join(job['target_dir'], 'wildcam_records.csv'),
+            job['point_name'], files, new_rows, job['replace_existing']
+        )
+
+    def _replace_csv_rows(self, csv_path: str, point_name: str, files,
+                          new_rows: list, replace_existing: bool = True):
+        """追加或原子替换一组CSV行；调用方必须位于串行工作线程。"""
+        has_current_schema = False
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            with open(csv_path, 'r', newline='', encoding='utf-8-sig') as source:
+                header = next(csv.reader(source), [])
+                has_current_schema = '文件名' in header
+            if not has_current_schema:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                stem, ext = os.path.splitext(csv_path)
+                backup_path = f"{stem}_旧格式备份_{timestamp}{ext}"
+                counter = 1
+                while os.path.exists(backup_path):
+                    backup_path = f"{stem}_旧格式备份_{timestamp}_{counter}{ext}"
+                    counter += 1
+                shutil.copy2(csv_path, backup_path)
+
+        if has_current_schema and not replace_existing:
+            with open(csv_path, 'a', newline='', encoding='utf-8-sig') as target:
+                csv.DictWriter(target, fieldnames=CSV_HEADERS).writerows(new_rows)
+            return
+
+        current_names = {os.path.basename(path) for path in files}
+        temp_path = f"{csv_path}.tmp"
+        try:
+            with open(temp_path, 'w', newline='', encoding='utf-8-sig') as target:
+                writer = csv.DictWriter(target, fieldnames=CSV_HEADERS)
+                writer.writeheader()
+                if has_current_schema:
+                    with open(csv_path, 'r', newline='', encoding='utf-8-sig') as source:
+                        for row in csv.DictReader(source):
+                            if (row.get('点位名称', '') == point_name
+                                    and row.get('文件名', '') in current_names):
+                                continue
+                            writer.writerow({h: row.get(h, '') for h in CSV_HEADERS})
+                writer.writerows(new_rows)
+            os.replace(temp_path, csv_path)
+        except Exception:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            raise
 
     def _write_csv_record(self, target_species: str = None, replace_existing: bool = True):
         """
@@ -3591,7 +4530,7 @@ class WildCamSorter:
 
     def _prompt_jump_to_media(self):
         """询问照片/视频序号，并启动不阻塞界面的分批查找。"""
-        if not isinstance(self.groups, MediaGroupSequence) or not self.groups:
+        if not hasattr(self.groups, 'group_index_for_file') or not self.groups:
             messagebox.showinfo("跳转至", "请先打开包含媒体文件的文件夹。")
             return
         query = simpledialog.askstring(
@@ -3616,7 +4555,7 @@ class WildCamSorter:
     def _continue_jump_to_media(self):
         """每次只检查一小批内存文件名，让百万级查找期间仍可操作界面。"""
         state = self._jump_search_state
-        if state is None or not isinstance(self.groups, MediaGroupSequence):
+        if state is None or not hasattr(self.groups, 'group_index_for_file'):
             return
         group_index, next_index, finished = search_media_group_chunk(
             self.groups, state['query'], state['next_index']
@@ -3680,27 +4619,44 @@ class WildCamSorter:
             canvas_w = 1800
         
         total = len(self.groups)
-        processed = len(self.processed_groups)
+        selected_processed = min(self._selected_processed_count, total)
+        all_total = len(self.all_groups) if self.all_groups else total
+        source_prefix = os.path.basename(self.source_dir or '') + os.sep
+        folder_processed = min(sum(
+            1 for rel in self.processed_groups if rel.startswith(source_prefix)
+        ), all_total)
         
         # 背景
         self.progress_canvas.create_rectangle(0, 0, canvas_w, 5, fill='#333333', outline='')
-        # 进度
-        if total > 0:
-            ratio = min(processed / total, 1.0)
+        # 上2px为文件夹全部数据（蓝色），下3px为本次选中数据（黄色）。
+        if all_total > 0:
+            ratio = min(folder_processed / all_total, 1.0)
             self.progress_canvas.create_rectangle(
-                0, 0, int(canvas_w * ratio), 5,
+                0, 0, int(canvas_w * ratio), 2,
                 fill=COLOR_PROGRESS, outline=''
             )
-        
-        self.label_count.config(text=f"已处理: {processed}/{total} 组")
+        if total > 0:
+            ratio = min(selected_processed / total, 1.0)
+            self.progress_canvas.create_rectangle(
+                0, 2, int(canvas_w * ratio), 5,
+                fill='#FBC02D', outline=''
+            )
+        self.label_count.config(
+            text=f"文件夹 {folder_processed}/{all_total}｜已选 {selected_processed}/{total} 组"
+        )
+        self.label_remaining.config(
+            text=(f"文件夹内数据剩余 {max(0, all_total-folder_processed)} 组待处理\n"
+                  f"已选中数据剩余 {max(0, total-selected_processed)} 组待处理")
+        )
     
     def _update_status(self):
         """更新状态栏"""
         if not self.groups:
             return
-        remaining = len(self.groups) - len(self.processed_groups)
+        remaining = len(self.groups) - self._selected_processed_count
         if remaining > 0:
-            self.label_status.config(text=f"📋 剩余 {remaining} 组待处理", fg='#AAAAAA')
+            if not self.label_status.cget('text'):
+                self.label_status.config(text="就绪", fg='#AAAAAA')
         else:
             self.label_status.config(text="🎉 全部完成！", fg='#4CAF50')
     
@@ -3708,6 +4664,19 @@ class WildCamSorter:
     
     def _on_close(self):
         """关闭窗口清理"""
+        if not self._closing and self._pending_group_indices:
+            pending = len(self._pending_group_indices)
+            wait_for_finish = messagebox.askyesno(
+                "分类仍在保存",
+                f"后台还有 {pending} 组正在复制并写入记录。\n\n"
+                "是否等待全部保存完成后自动退出？\n"
+                "选择“否”将返回程序，不会强制中断记录。",
+                parent=self.root
+            )
+            if wait_for_finish:
+                self.label_status.config(text=f"正在保存最后 {pending} 组，完成后自动退出…")
+                self.root.after(100, self._close_when_classification_finishes)
+            return
         self._closing = True
         if self._scan_cancel_event is not None:
             self._scan_cancel_event.set()
@@ -3720,6 +4689,13 @@ class WildCamSorter:
         self._log(f"程序关闭")
         self._stop_video()
         self.root.destroy()
+
+    def _close_when_classification_finishes(self):
+        self._schedule_classification_poll(1)
+        if self._pending_group_indices:
+            self.root.after(100, self._close_when_classification_finishes)
+        else:
+            self._on_close()
     
     # ==================== 日志系统 ====================
     
