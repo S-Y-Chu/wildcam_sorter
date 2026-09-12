@@ -35,4 +35,4 @@
 
 ## 作者
 
-Siyuan ZHU，2026。
+Siyuan ZHU，2026
