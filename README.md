@@ -20,6 +20,7 @@ WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。�
 - 不同文件序号范围可使用不同拍摄模式，也可限定本次只查看/分类的范围。
 - 蓝色显示文件夹总进度，黄色显示选中范围进度；支持白色、黑色和跟随系统主题。
 - 可识别输出文件夹里人工分类但未记入软件记录的文件，并补写 CSV。
+- 修复 macOS Aqua 原生按钮忽略自定义背景后出现的白底白字问题，所有按钮在浅色、黑色和跟随系统主题下均保持清晰可读。
 
 ### 安装与运行
 
@@ -122,6 +123,7 @@ WildCam Sorter is a local desktop tool for classifying trail-camera photos and v
 - Different file-number ranges can use different capture patterns, and the current session can be limited to a selected range.
 - Blue shows whole-folder progress and yellow shows selected-range progress; light, dark, and system themes are available.
 - Detects files sorted manually in the output tree but missing from app records and restores their CSV entries.
+- Fixes white-on-white button labels caused by macOS Aqua ignoring custom button backgrounds, keeping every button readable in light, dark, and system themes.
 
 ### Installation and launch
 

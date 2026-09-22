@@ -77,6 +77,44 @@ class FullScreenViewerTests(unittest.TestCase):
 
 
 class PlatformCompatibilityTests(unittest.TestCase):
+    def test_macos_native_buttons_use_dark_readable_text(self):
+        button = MagicMock()
+
+        result = wildcam_sorter.ensure_macos_button_readability(button, 'darwin')
+
+        self.assertIs(result, button)
+        button.configure.assert_called_once_with(
+            foreground=wildcam_sorter.MACOS_BUTTON_TEXT,
+            activeforeground=wildcam_sorter.MACOS_BUTTON_ACTIVE_TEXT,
+            disabledforeground=wildcam_sorter.MACOS_BUTTON_DISABLED_TEXT,
+        )
+
+    def test_non_macos_button_colors_are_not_overridden(self):
+        button = MagicMock()
+
+        result = wildcam_sorter.ensure_macos_button_readability(button, 'win32')
+
+        self.assertIs(result, button)
+        button.configure.assert_not_called()
+
+    def test_button_factory_applies_macos_contrast_fix(self):
+        button = MagicMock()
+        parent = MagicMock()
+        with patch.object(wildcam_sorter.sys, 'platform', 'darwin'), \
+                patch.object(wildcam_sorter.tk, 'Button', return_value=button) as button_cls:
+            result = wildcam_sorter.create_button(
+                parent, text='教程', bg='#1565C0', fg='white'
+            )
+
+        self.assertIs(result, button)
+        button_cls.assert_called_once_with(
+            parent, text='教程', bg='#1565C0', fg='white'
+        )
+        self.assertEqual(
+            button.configure.call_args.kwargs['foreground'],
+            wildcam_sorter.MACOS_BUTTON_TEXT,
+        )
+
     def test_macos_uses_avfoundation_without_directshow(self):
         with patch.multiple(
             wildcam_sorter.cv2,

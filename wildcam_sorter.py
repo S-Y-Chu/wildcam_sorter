@@ -108,6 +108,13 @@ THEME_DARK_TO_LIGHT = {
     '#888888': '#6B7280', '#424242': '#4B5563', '#555555': '#6B7280',
 }
 
+# macOS 的 Aqua 原生 Button 会忽略自定义 background，却保留 foreground。
+# 如果仍使用白色文字，就会出现白底白字。所有按钮统一通过 create_button
+# 创建，在 macOS 上使用适合原生浅色按钮表面的深色文字。
+MACOS_BUTTON_TEXT = '#202124'
+MACOS_BUTTON_ACTIVE_TEXT = '#111827'
+MACOS_BUTTON_DISABLED_TEXT = '#6B7280'
+
 # CSV固定列。文件名放在第一列，图片和视频统一按“一个文件一行”记录。
 CSV_HEADERS = ['文件名', '经度', '纬度', '海拔高度(m)', '物种名', '拍摄时间', '点位名称']
 
@@ -167,6 +174,23 @@ def system_uses_dark_theme() -> bool:
     except Exception:
         pass
     return False
+
+
+def ensure_macos_button_readability(button, platform_name: str = None):
+    """修正 macOS Aqua 忽略按钮背景后造成的白底白字问题。"""
+    platform_name = platform_name or sys.platform
+    if platform_name == 'darwin':
+        button.configure(
+            foreground=MACOS_BUTTON_TEXT,
+            activeforeground=MACOS_BUTTON_ACTIVE_TEXT,
+            disabledforeground=MACOS_BUTTON_DISABLED_TEXT,
+        )
+    return button
+
+
+def create_button(parent, **kwargs):
+    """创建跨平台按钮；Windows/Linux 保持原样，macOS 确保文字可读。"""
+    return ensure_macos_button_readability(tk.Button(parent, **kwargs))
 
 def natural_sort_key(filename: str) -> list:
     """
@@ -948,7 +972,7 @@ class MediaPanel:
         # 不 pack，节省高度给图片
         
         # 右上角切换按钮（明显的按钮样式，点击切换选中/取消选中）
-        self.select_btn = tk.Button(
+        self.select_btn = create_button(
             self.frame,
             text="✓ 已选",
             font=("微软雅黑", 9, "bold"),
@@ -1153,7 +1177,7 @@ class MediaPanel:
         
         # 创建物种按钮（小字体，紧凑）
         for i, name in enumerate(species_list[:8]):  # 每行最多8个
-            btn = tk.Button(
+            btn = create_button(
                 self.mini_species_row,
                 text=name,
                 font=("微软雅黑", 8),
@@ -1167,7 +1191,7 @@ class MediaPanel:
             self.mini_buttons[name] = btn
         
         # 迷你多类别按钮（进入多类模式后变「完成分类」）
-        self.mini_multi_btn = tk.Button(
+        self.mini_multi_btn = create_button(
             self.mini_func_row,
             text="📋 多类别", font=("微软雅黑", 8),
             bg='#6A1B9A', fg='white',
@@ -1178,7 +1202,7 @@ class MediaPanel:
         self.mini_multi_btn.pack(side=tk.LEFT, padx=1, pady=1)
         
         # 迷你刷新按钮
-        self.mini_refresh_btn = tk.Button(
+        self.mini_refresh_btn = create_button(
             self.mini_func_row,
             text="🔄", font=("微软雅黑", 8),
             bg='#455A64', fg='white',
@@ -1291,7 +1315,7 @@ class MediaPanel:
             btn.destroy()
         self.mini_buttons.clear()
         for i, name in enumerate(species_list[:8]):
-            btn = tk.Button(
+            btn = create_button(
                 self.mini_species_row,
                 text=name,
                 font=("微软雅黑", 8),
@@ -1336,7 +1360,7 @@ class ScanProgressDialog:
         self.progress = ttk.Progressbar(self.window, mode='indeterminate', length=450)
         self.progress.pack(pady=8)
         self.progress.start(12)
-        self.cancel_button = tk.Button(
+        self.cancel_button = create_button(
             self.window, text="取消扫描", font=("微软雅黑", 9),
             bg='#616161', fg='white', relief=tk.FLAT, cursor='hand2',
             command=cancel_callback, padx=16, pady=4
@@ -1425,7 +1449,7 @@ class PathSelectDialog:
         self.entry_input.pack(side=tk.LEFT, padx=5, ipady=3)
         if initial_input:
             self.entry_input.insert(0, initial_input)
-        tk.Button(input_row, text="📁", font=("微软雅黑", 10),
+        create_button(input_row, text="📁", font=("微软雅黑", 10),
                   bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                   command=lambda: self._browse(self.entry_input)
                   ).pack(side=tk.LEFT, padx=2)
@@ -1440,7 +1464,7 @@ class PathSelectDialog:
         self.entry_output.pack(side=tk.LEFT, padx=5, ipady=3)
         if initial_output:
             self.entry_output.insert(0, initial_output)
-        tk.Button(output_row, text="📁", font=("微软雅黑", 10),
+        create_button(output_row, text="📁", font=("微软雅黑", 10),
                   bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                   command=lambda: self._browse(self.entry_output)
                   ).pack(side=tk.LEFT, padx=2)
@@ -1506,7 +1530,7 @@ class PathSelectDialog:
         self.extra_segments_frame.pack(fill=tk.X)
         for segment in (initial_segments or [])[1:]:
             self._add_segment_row(segment)
-        tk.Button(
+        create_button(
             mode_box, text="＋ 添加下一个模式范围", font=("微软雅黑", 9),
             bg='#455A64', fg='white', relief=tk.FLAT, cursor='hand2',
             command=self._add_segment_row
@@ -1542,11 +1566,11 @@ class PathSelectDialog:
         # ---- 按钮行 ----
         btn_row = tk.Frame(self.window, bg='#1E1E1E')
         btn_row.pack(pady=(5, 15))
-        tk.Button(btn_row, text="确定", font=("微软雅黑", 10),
+        create_button(btn_row, text="确定", font=("微软雅黑", 10),
                   bg='#2E7D32', fg='white', relief=tk.FLAT, cursor='hand2',
                   padx=20, pady=4, command=self._on_ok
                   ).pack(side=tk.LEFT, padx=10)
-        tk.Button(btn_row, text="取消", font=("微软雅黑", 10),
+        create_button(btn_row, text="取消", font=("微软雅黑", 10),
                   bg='#555555', fg='white', relief=tk.FLAT, cursor='hand2',
                   padx=20, pady=4, command=self._on_cancel
                   ).pack(side=tk.LEFT, padx=10)
@@ -1583,7 +1607,7 @@ class PathSelectDialog:
                      values=list(ORDER_DISPLAY_NAMES.values()), state='readonly',
                      width=9).pack(side=tk.LEFT, padx=4)
         item = {'frame': row, 'entries': entries, 'order_var': order_var}
-        tk.Button(row, text="删除", bg='#8E2A2A', fg='white', relief=tk.FLAT,
+        create_button(row, text="删除", bg='#8E2A2A', fg='white', relief=tk.FLAT,
                   command=lambda: self._remove_segment_row(item)).pack(side=tk.RIGHT)
         self.extra_segment_rows.append(item)
 
@@ -1780,7 +1804,7 @@ class FullScreenViewer:
         self.label_zoom.pack(side=tk.LEFT, padx=15, pady=6)
         
         # 返回按钮（右上角）
-        btn_close = tk.Button(toolbar, text="✕ 返回", font=("微软雅黑", 9),
+        btn_close = create_button(toolbar, text="✕ 返回", font=("微软雅黑", 9),
                               bg='#555555', fg='white', relief=tk.FLAT, cursor='hand2',
                               command=self._close, padx=10, pady=2)
         btn_close.pack(side=tk.RIGHT, padx=8, pady=4)
@@ -1826,34 +1850,34 @@ class FullScreenViewer:
         zoom_row.pack_propagate(False)
         
         # 缩小按钮
-        btn_zoom_out = tk.Button(zoom_row, text="🔍− 缩小", font=("微软雅黑", 10),
+        btn_zoom_out = create_button(zoom_row, text="🔍− 缩小", font=("微软雅黑", 10),
                                  bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                                  command=lambda: self._zoom_by_factor(
                                      1.0 / self.BUTTON_ZOOM_FACTOR), padx=8, pady=3)
         btn_zoom_out.pack(side=tk.LEFT, padx=8, pady=4)
         
         # 放大按钮
-        btn_zoom_in = tk.Button(zoom_row, text="🔍+ 放大", font=("微软雅黑", 10),
+        btn_zoom_in = create_button(zoom_row, text="🔍+ 放大", font=("微软雅黑", 10),
                                 bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                                 command=lambda: self._zoom_by_factor(
                                     self.BUTTON_ZOOM_FACTOR), padx=8, pady=3)
         btn_zoom_in.pack(side=tk.LEFT, padx=2, pady=4)
         
         # 适合窗口按钮
-        btn_fit = tk.Button(zoom_row, text="📐 适合窗口", font=("微软雅黑", 10),
+        btn_fit = create_button(zoom_row, text="📐 适合窗口", font=("微软雅黑", 10),
                             bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                             command=self._fit_to_window, padx=8, pady=3)
         btn_fit.pack(side=tk.LEFT, padx=8, pady=4)
         
         # 100%按钮
-        btn_100 = tk.Button(zoom_row, text="1:1 原始", font=("微软雅黑", 10),
+        btn_100 = create_button(zoom_row, text="1:1 原始", font=("微软雅黑", 10),
                             bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                             command=self._show_original_pixels, padx=8, pady=3)
         btn_100.pack(side=tk.LEFT, padx=2, pady=4)
         
         # 播放控制（仅视频）
         if is_video:
-            self.btn_play = tk.Button(video_row, text="⏯ 暂停", font=("微软雅黑", 10),
+            self.btn_play = create_button(video_row, text="⏯ 暂停", font=("微软雅黑", 10),
                                       bg='#424242', fg='white', relief=tk.FLAT, cursor='hand2',
                                       command=self._toggle_video, padx=10, pady=3)
             self.btn_play.pack(side=tk.LEFT, padx=(8, 5), pady=5)
@@ -2500,7 +2524,7 @@ class WildCamSorter:
         toolbar.grid_propagate(False)
         
         # 路径与模式按钮
-        self.btn_open = tk.Button(
+        self.btn_open = create_button(
             toolbar, text="⚙ 路径与模式", font=("微软雅黑", 10),
             bg='#0D7377', fg='white', activebackground='#14919B',
             relief=tk.FLAT, cursor='hand2',
@@ -2516,7 +2540,7 @@ class WildCamSorter:
         self.label_folder.pack(side=tk.LEFT, padx=10, pady=3, fill=tk.X, expand=True)
 
         # 系统设置独立放在右上角；路径与模式仍保留在左上角。
-        self.btn_settings = tk.Button(
+        self.btn_settings = create_button(
             toolbar, text="⚙", font=("微软雅黑", 12),
             bg='#455A64', fg='white', activebackground='#607D8B',
             relief=tk.FLAT, cursor='hand2', command=self._show_settings,
@@ -2577,6 +2601,10 @@ class WildCamSorter:
                         widget.configure(**{option: converted})
                 except (tk.TclError, AttributeError):
                     pass
+            # 主题转换可能再次写回白色 foreground；Aqua 的按钮表面仍是浅色，
+            # 因此每次切换主题后都重新保证 macOS 按钮文字有足够对比度。
+            if isinstance(widget, tk.Button):
+                ensure_macos_button_readability(widget)
             for child in widget.winfo_children():
                 visit(child)
 
@@ -2624,14 +2652,14 @@ class WildCamSorter:
         info = tk.LabelFrame(window, text=" 帮助 ", bg=COLOR_BG, fg=COLOR_TEXT,
                              padx=12, pady=12)
         info.pack(fill=tk.X, padx=35, pady=15)
-        tk.Button(info, text="教程（README）", command=self._show_tutorial,
+        create_button(info, text="教程（README）", command=self._show_tutorial,
                   bg='#1565C0', fg='white', relief=tk.FLAT, padx=12).pack(
                       side=tk.LEFT, padx=5)
-        tk.Button(info, text="关于", command=lambda: messagebox.showinfo(
+        create_button(info, text="关于", command=lambda: messagebox.showinfo(
             "关于", f"WildCam Sorter v{APP_VERSION}\n野外相机照片/视频分类工具",
             parent=window), bg='#455A64', fg='white', relief=tk.FLAT,
             padx=12).pack(side=tk.LEFT, padx=5)
-        tk.Button(info, text="联系作者", command=lambda: messagebox.showinfo(
+        create_button(info, text="联系作者", command=lambda: messagebox.showinfo(
             "联系作者", "作者：S-Y-Chu\n邮箱：siyuanzhu.cn@gmail.com",
             parent=window), bg='#455A64', fg='white', relief=tk.FLAT,
             padx=12).pack(side=tk.LEFT, padx=5)
@@ -2727,7 +2755,7 @@ class WildCamSorter:
         left_frame.pack(side=tk.LEFT, fill=tk.Y)
         
         # 空拍按钮
-        self.btn_empty = tk.Button(
+        self.btn_empty = create_button(
             left_frame, text="🟦  空拍", font=("微软雅黑", 11, "bold"),
             bg=COLOR_BUTTON_EMPTY, fg='white', activebackground='#78909C',
             relief=tk.FLAT, cursor='hand2', padx=14, pady=8,
@@ -2742,7 +2770,7 @@ class WildCamSorter:
         # 多类别切换按钮
         self.multi_mode = False
         self.multi_selected = set()  # 多类模式下选中的物种集合
-        self.btn_multi = tk.Button(
+        self.btn_multi = create_button(
             left_frame, text="📋 多类别", font=("微软雅黑", 11, "bold"),
             bg='#6A1B9A', fg='white', activebackground='#9C27B0',
             relief=tk.FLAT, cursor='hand2', padx=10, pady=8,
@@ -2751,7 +2779,7 @@ class WildCamSorter:
         self.btn_multi.pack(side=tk.LEFT, padx=4)
         
         # 新物种按钮
-        self.btn_new = tk.Button(
+        self.btn_new = create_button(
             left_frame, text="🟧  新物种", font=("微软雅黑", 11, "bold"),
             bg=COLOR_BUTTON_NEW, fg='white', activebackground='#FF8A00',
             relief=tk.FLAT, cursor='hand2', padx=14, pady=8,
@@ -2771,7 +2799,7 @@ class WildCamSorter:
         self.label_group_info.pack(side=tk.LEFT, padx=10)
         
         # 上一组
-        self.btn_prev = tk.Button(
+        self.btn_prev = create_button(
             right_frame, text="◀ 上一组", font=("微软雅黑", 10),
             bg=COLOR_BUTTON_NAV, fg='white', activebackground='#616161',
             relief=tk.FLAT, cursor='hand2', padx=10, pady=6,
@@ -2780,7 +2808,7 @@ class WildCamSorter:
         self.btn_prev.pack(side=tk.LEFT, padx=3)
 
         # 按照片/视频文件序号跳转（放在上一组与下一组之间）
-        self.btn_jump_to_media = tk.Button(
+        self.btn_jump_to_media = create_button(
             right_frame, text="跳转至", font=("微软雅黑", 10),
             bg='#6A1B9A', fg='white', activebackground='#8E24AA',
             relief=tk.FLAT, cursor='hand2', padx=10, pady=6,
@@ -2789,7 +2817,7 @@ class WildCamSorter:
         self.btn_jump_to_media.pack(side=tk.LEFT, padx=3)
         
         # 下一组
-        self.btn_next = tk.Button(
+        self.btn_next = create_button(
             right_frame, text="下一组 ▶", font=("微软雅黑", 10),
             bg=COLOR_BUTTON_NAV, fg='white', activebackground='#616161',
             relief=tk.FLAT, cursor='hand2', padx=10, pady=6,
@@ -2798,7 +2826,7 @@ class WildCamSorter:
         self.btn_next.pack(side=tk.LEFT, padx=3)
         
         # 跳至未处理按钮
-        self.btn_jump = tk.Button(
+        self.btn_jump = create_button(
             right_frame, text="⏭ 跳至未处理", font=("微软雅黑", 10),
             bg='#1565C0', fg='white', activebackground='#1E88E5',
             relief=tk.FLAT, cursor='hand2', padx=10, pady=6,
@@ -4495,7 +4523,7 @@ class WildCamSorter:
                 row_frame.pack(fill=tk.X, pady=1)
                 row_frames.append(row_frame)
             
-            btn = tk.Button(
+            btn = create_button(
                 row_frames[row_idx],
                 text=name,
                 font=("微软雅黑", 11),
