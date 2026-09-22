@@ -50,6 +50,7 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from collections import OrderedDict
 from collections.abc import Sequence
 
 import tkinter as tk
@@ -100,6 +101,10 @@ COLOR_PROGRESS = '#1565C0'           # 蓝色 - 进度条
 COLOR_TOOLBAR = '#111111'
 
 APP_VERSION = '1.10'
+IMAGE_PREVIEW_WORKERS = 4
+VIDEO_PREVIEW_WORKERS = 1
+PREVIEW_CACHE_LIMIT = 16
+VIDEO_AUTOPLAY_FALLBACK_MS = 2500
 THEME_DISPLAY_NAMES = {'system': '跟随系统主题', 'light': '白色主题', 'dark': '黑色主题'}
 THEME_DARK_TO_LIGHT = {
     '#1E1E1E': '#F3F4F6', '#252525': '#FFFFFF', '#111111': '#E5E7EB',
@@ -2459,11 +2464,33 @@ class WildCamSorter:
         self._resize_after_id = None      # 窗口调整大小时的防抖 ID
         self._panels_ready = False        # 面板是否已完成首次渲染
         self._preview_generation = 0
-        self._preview_queue = queue.Queue(maxsize=64)
+        # 图片与视频首帧分离：慢视频不再占用图片线程。图片用优先队列，
+        # 当前组优先于下一组的后台预读。
+        self._image_preview_queue = queue.PriorityQueue()
+        self._video_preview_queue = queue.Queue(maxsize=32)
         self._preview_result_queue = queue.Queue()
         self._preview_poll_after_id = None
-        for _ in range(2):
-            threading.Thread(target=self._preview_worker, daemon=True).start()
+        self._preview_task_sequence = 0
+        self._preview_pending = set()
+        self._preview_completed_panels = set()
+        self._preview_pending_images = 0
+        self._preview_cache = OrderedDict()
+        self._preview_cache_lock = threading.Lock()
+        self._pending_video_start = None
+        self._autoplay_video_preview_ready = False
+        self._video_start_after_id = None
+        for _ in range(IMAGE_PREVIEW_WORKERS):
+            threading.Thread(
+                target=self._preview_worker,
+                args=(self._image_preview_queue, 'image'),
+                daemon=True,
+            ).start()
+        for _ in range(VIDEO_PREVIEW_WORKERS):
+            threading.Thread(
+                target=self._preview_worker,
+                args=(self._video_preview_queue, 'video'),
+                daemon=True,
+            ).start()
         
         # ===== 日志系统 =====
         self.logger = None
@@ -3364,11 +3391,26 @@ class WildCamSorter:
         self._stop_video()
         self._preview_generation += 1
         preview_generation = self._preview_generation
-        try:
-            while True:
-                self._preview_queue.get_nowait()
-        except queue.Empty:
-            pass
+        if self._video_start_after_id is not None:
+            try:
+                self.root.after_cancel(self._video_start_after_id)
+            except tk.TclError:
+                pass
+            self._video_start_after_id = None
+        for preview_queue in (self._image_preview_queue, self._video_preview_queue):
+            try:
+                while True:
+                    preview_queue.get_nowait()
+            except queue.Empty:
+                pass
+        self._preview_pending.clear()
+        self._preview_completed_panels.clear()
+        self._preview_pending_images = sum(
+            1 for path in self.groups[group_index]
+            if not is_video_file(os.path.basename(path))
+        )
+        self._pending_video_start = None
+        self._autoplay_video_preview_ready = False
         
         self.current_group_index = group_index
         self.current_group_files = self.groups[group_index]
@@ -3421,11 +3463,7 @@ class WildCamSorter:
                 self._queue_preview(panel, file_path, preview_generation)
                 if is_video_file(filename) and not video_started:
                     video_started = True
-                    self.root.after(
-                        300,
-                        lambda g=preview_generation, p=file_path, target=panel:
-                        self._start_video_if_current(g, p, target)
-                    )
+                    self._pending_video_start = (preview_generation, file_path, panel)
             else:
                 panel.label_text = f"媒体 {panel_idx + 1}"
                 panel.display_placeholder()
@@ -3461,17 +3499,24 @@ class WildCamSorter:
                 self._queue_preview(op, file_path, preview_generation)
                 if is_video_file(os.path.basename(file_path)) and not video_started:
                     video_started = True
-                    self.root.after(
-                        300,
-                        lambda g=preview_generation, p=file_path, target=op:
-                        self._start_video_if_current(g, p, target)
-                    )
+                    self._pending_video_start = (preview_generation, file_path, op)
                 op.set_selected(self.selected_flags[file_idx])
                 self.overflow_panels.append(op)
         else:
             # 隐藏溢出行
             self.overflow_frame.grid_forget()
             self.display_frame.grid_rowconfigure(2, weight=0)
+
+        # 视频首帧与图片均完成后再打开实时解码，避免同一视频被同时打开两次。
+        # 极慢或损坏文件由兜底定时器放行，不能让自动播放永久等待。
+        if self._pending_video_start is not None:
+            self._video_start_after_id = self.root.after(
+                VIDEO_AUTOPLAY_FALLBACK_MS,
+                lambda g=preview_generation: self._maybe_start_pending_video(g, force=True)
+            )
+
+        # 图片线程空闲时预读下一组。缓存只保留少量缩略图，不随500G目录增长。
+        self._queue_next_group_previews(group_index, preview_generation)
         
         # 更新所有面板的选中状态
         self._update_all_panel_selections()
@@ -3505,32 +3550,107 @@ class WildCamSorter:
         self._update_progress_bar()
         self._update_status()
 
+    def _next_preview_sequence(self) -> int:
+        self._preview_task_sequence += 1
+        return self._preview_task_sequence
+
+    def _preview_cache_get(self, cache_key):
+        with self._preview_cache_lock:
+            image = self._preview_cache.pop(cache_key, None)
+            if image is not None:
+                self._preview_cache[cache_key] = image
+                return image.copy()
+        return None
+
+    def _preview_cache_put(self, cache_key, image):
+        with self._preview_cache_lock:
+            self._preview_cache.pop(cache_key, None)
+            self._preview_cache[cache_key] = image.copy()
+            while len(self._preview_cache) > PREVIEW_CACHE_LIMIT:
+                self._preview_cache.popitem(last=False)
+
     def _queue_preview(self, panel: MediaPanel, file_path: str, generation: int):
-        """提交一个可丢弃的缩略图任务；队列满时优先保证界面响应。"""
+        """提交当前组缩略图；图片与视频使用互不阻塞的工作队列。"""
         width, height = panel._calc_display_size()
-        job = (generation, panel.index, file_path, max(width, 320), max(height, 200))
-        try:
-            self._preview_queue.put_nowait(job)
-        except queue.Full:
+        width, height = max(width, 320), max(height, 200)
+        media_kind = 'video' if is_video_file(os.path.basename(file_path)) else 'image'
+        pending_key = (generation, panel.index, file_path)
+        self._preview_pending.add(pending_key)
+
+        if media_kind == 'image':
+            cache_key = (file_path, width, height)
+            cached = self._preview_cache_get(cache_key)
+            if cached is not None:
+                self._preview_result_queue.put(
+                    (generation, panel.index, file_path, cached, None, media_kind)
+                )
+            else:
+                job = (
+                    0, self._next_preview_sequence(), generation, panel.index,
+                    file_path, width, height, False,
+                )
+                self._image_preview_queue.put_nowait(job)
+        else:
+            job = (generation, panel.index, file_path, width, height, False)
             try:
-                self._preview_queue.get_nowait()
-                self._preview_queue.put_nowait(job)
-            except queue.Empty:
-                pass
+                self._video_preview_queue.put_nowait(job)
+            except queue.Full:
+                self._preview_result_queue.put(
+                    (generation, panel.index, file_path, None,
+                     '视频预览队列已满', media_kind)
+                )
         if self._preview_poll_after_id is None:
             self._preview_poll_after_id = self.root.after(20, self._poll_preview_results)
 
-    def _preview_worker(self):
-        """在后台读取、旋转和缩放图片/视频首帧。"""
+    def _queue_next_group_previews(self, group_index: int, generation: int):
+        """低优先级预读下一组图片，切组后可直接使用内存中的小缩略图。"""
+        next_index = group_index + 1
+        if next_index >= len(self.groups):
+            return
+        default_width, default_height = self._panels[0]._calc_display_size()
+        width, height = max(default_width, 320), max(default_height, 200)
+        for file_path in self.groups[next_index]:
+            if is_video_file(os.path.basename(file_path)):
+                continue
+            cache_key = (file_path, width, height)
+            with self._preview_cache_lock:
+                already_cached = cache_key in self._preview_cache
+            if already_cached:
+                continue
+            job = (
+                10, self._next_preview_sequence(), generation, -1,
+                file_path, width, height, True,
+            )
+            self._image_preview_queue.put_nowait(job)
+
+    @staticmethod
+    def _decode_image_preview(file_path: str, width: int, height: int):
+        """按目标尺寸尽早降采样JPEG，避免为小预览完整展开超大原图。"""
+        with Image.open(file_path) as source:
+            try:
+                source.draft('RGB', (width, height))
+            except (AttributeError, OSError, ValueError):
+                pass
+            source.load()
+            image = ImageOps.exif_transpose(source).copy()
+        image.thumbnail((width, height), Image.Resampling.LANCZOS)
+        return image
+
+    def _preview_worker(self, work_queue, media_kind: str):
+        """后台读取缩略图；图片和视频各自使用独立队列。"""
         while True:
-            generation, panel_index, file_path, width, height = self._preview_queue.get()
-            if generation != self._preview_generation:
+            job = work_queue.get()
+            if media_kind == 'image':
+                _, _, generation, panel_index, file_path, width, height, preload = job
+            else:
+                generation, panel_index, file_path, width, height, preload = job
+            if not preload and generation != self._preview_generation:
                 continue
             image = None
             error = None
             cap = None
             try:
-                if is_video_file(os.path.basename(file_path)):
+                if media_kind == 'video':
                     cap = open_video_capture(file_path)
                     if cap is None:
                         raise OSError('无法读取视频首帧')
@@ -3538,19 +3658,23 @@ class WildCamSorter:
                     if not ok:
                         raise OSError('无法读取视频首帧')
                     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    image.thumbnail((width, height), Image.Resampling.LANCZOS)
                 else:
-                    with Image.open(file_path) as source:
-                        source.load()
-                        image = ImageOps.exif_transpose(source).copy()
-                image.thumbnail((width, height), Image.Resampling.LANCZOS)
+                    image = self._decode_image_preview(file_path, width, height)
             except Exception as exc:
                 error = str(exc)
                 image = None
             finally:
                 if cap is not None:
                     cap.release()
+            if preload:
+                if image is not None:
+                    self._preview_cache_put((file_path, width, height), image)
+                continue
+            if generation != self._preview_generation:
+                continue
             self._preview_result_queue.put(
-                (generation, panel_index, file_path, image, error)
+                (generation, panel_index, file_path, image, error, media_kind)
             )
 
     def _panel_for_index(self, panel_index: int):
@@ -3564,11 +3688,13 @@ class WildCamSorter:
         self._preview_poll_after_id = None
         try:
             while True:
-                generation, panel_index, file_path, image, error = (
+                generation, panel_index, file_path, image, error, media_kind = (
                     self._preview_result_queue.get_nowait()
                 )
                 if generation != self._preview_generation:
                     continue
+                pending_key = (generation, panel_index, file_path)
+                self._preview_pending.discard(pending_key)
                 panel = self._panel_for_index(panel_index)
                 if panel is None or panel.file_path != file_path:
                     continue
@@ -3579,11 +3705,43 @@ class WildCamSorter:
                     photo = ImageTk.PhotoImage(image)
                     panel._photo = photo
                     panel.media_label.config(image=photo, text='')
+
+                if panel_index not in self._preview_completed_panels:
+                    self._preview_completed_panels.add(panel_index)
+                    if media_kind == 'image':
+                        self._preview_pending_images = max(
+                            0, self._preview_pending_images - 1
+                        )
+                pending_video = self._pending_video_start
+                if (media_kind == 'video' and pending_video is not None
+                        and pending_video[0] == generation
+                        and pending_video[1] == file_path):
+                    self._autoplay_video_preview_ready = True
+                self._maybe_start_pending_video(generation)
         except queue.Empty:
             pass
-        if (not self._preview_queue.empty() or not self._preview_result_queue.empty()) \
+        # 不能只看队列是否为空：最后一个任务可能已被工作线程取走、仍在解码。
+        # 只要当前组还有未返回的面板，就必须继续轮询结果。
+        if (self._preview_pending or not self._preview_result_queue.empty()) \
                 and not self._closing:
             self._preview_poll_after_id = self.root.after(20, self._poll_preview_results)
+
+    def _maybe_start_pending_video(self, generation: int, force: bool = False):
+        pending = self._pending_video_start
+        if pending is None or pending[0] != generation:
+            return
+        if not force and (
+                self._preview_pending_images > 0
+                or not self._autoplay_video_preview_ready):
+            return
+        self._pending_video_start = None
+        if self._video_start_after_id is not None:
+            try:
+                self.root.after_cancel(self._video_start_after_id)
+            except tk.TclError:
+                pass
+            self._video_start_after_id = None
+        self._start_video_if_current(*pending)
 
     def _start_video_if_current(self, generation: int, file_path: str,
                                 panel: MediaPanel):
