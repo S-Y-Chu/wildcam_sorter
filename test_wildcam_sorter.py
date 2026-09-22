@@ -148,6 +148,85 @@ class PlatformCompatibilityTests(unittest.TestCase):
             self.assertEqual(wildcam_sorter._windows_short_path('/tmp/测试.mp4'), '')
 
 
+class PreviewPipelineTests(unittest.TestCase):
+    def _make_app(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app._image_preview_queue = wildcam_sorter.queue.PriorityQueue()
+        app._video_preview_queue = wildcam_sorter.queue.Queue(maxsize=32)
+        app._preview_result_queue = wildcam_sorter.queue.Queue()
+        app._preview_poll_after_id = None
+        app._preview_task_sequence = 0
+        app._preview_pending = set()
+        app._preview_completed_panels = set()
+        app._preview_pending_images = 0
+        app._preview_cache = wildcam_sorter.OrderedDict()
+        app._preview_cache_lock = threading.Lock()
+        app._pending_video_start = None
+        app._autoplay_video_preview_ready = False
+        app._video_start_after_id = None
+        app._preview_generation = 1
+        app._closing = False
+        app.root = MagicMock()
+        app.root.after.return_value = 'after-id'
+        return app
+
+    def test_four_image_workers_and_a_separate_video_worker_are_configured(self):
+        self.assertEqual(wildcam_sorter.IMAGE_PREVIEW_WORKERS, 4)
+        self.assertEqual(wildcam_sorter.VIDEO_PREVIEW_WORKERS, 1)
+
+    def test_image_and_video_previews_use_separate_queues(self):
+        app = self._make_app()
+        image_panel = MagicMock(index=3)
+        image_panel._calc_display_size.return_value = (640, 400)
+        video_panel = MagicMock(index=0)
+        video_panel._calc_display_size.return_value = (640, 400)
+
+        app._queue_preview(image_panel, '/camera/004.jpg', 1)
+        app._queue_preview(video_panel, '/camera/001.mp4', 1)
+
+        self.assertEqual(app._image_preview_queue.qsize(), 1)
+        self.assertEqual(app._video_preview_queue.qsize(), 1)
+        image_job = app._image_preview_queue.get_nowait()
+        video_job = app._video_preview_queue.get_nowait()
+        self.assertEqual(image_job[4], '/camera/004.jpg')
+        self.assertEqual(video_job[2], '/camera/001.mp4')
+
+    def test_polling_continues_while_last_job_is_in_flight(self):
+        app = self._make_app()
+        app._preview_pending.add((1, 3, '/camera/004.jpg'))
+
+        app._poll_preview_results()
+
+        app.root.after.assert_called_once_with(20, app._poll_preview_results)
+        self.assertEqual(app._preview_poll_after_id, 'after-id')
+
+    def test_video_autoplay_waits_for_images_and_first_frame(self):
+        app = self._make_app()
+        panel = MagicMock()
+        app._pending_video_start = (1, '/camera/001.mp4', panel)
+        app._preview_pending_images = 1
+        app._autoplay_video_preview_ready = True
+        app._start_video_if_current = MagicMock()
+
+        app._maybe_start_pending_video(1)
+        app._start_video_if_current.assert_not_called()
+
+        app._preview_pending_images = 0
+        app._maybe_start_pending_video(1)
+        app._start_video_if_current.assert_called_once_with(
+            1, '/camera/001.mp4', panel
+        )
+
+    def test_image_decoder_returns_target_sized_preview(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'large.jpg')
+            wildcam_sorter.Image.new('RGB', (2400, 1600), 'green').save(path)
+            preview = WildCamSorter._decode_image_preview(path, 600, 400)
+
+        self.assertLessEqual(preview.width, 600)
+        self.assertLessEqual(preview.height, 400)
+
+
 class FullscreenDispatchTests(unittest.TestCase):
     def test_video_in_nonfirst_panel_opens_video_player(self):
         app = WildCamSorter.__new__(WildCamSorter)
