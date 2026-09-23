@@ -100,7 +100,7 @@ COLOR_BUTTON_NAV = '#424242'         # 灰色 - 导航按钮
 COLOR_PROGRESS = '#1565C0'           # 蓝色 - 进度条
 COLOR_TOOLBAR = '#111111'
 
-APP_VERSION = '1.10'
+APP_VERSION = '1.10.3'
 IMAGE_PREVIEW_WORKERS = 4
 VIDEO_PREVIEW_WORKERS = 1
 PREVIEW_CACHE_LIMIT = 16
@@ -111,7 +111,40 @@ THEME_DARK_TO_LIGHT = {
     '#1A1A1A': '#EEF0F3', '#242424': '#F8F9FA', '#333333': '#D1D5DB',
     '#E0E0E0': '#202124', '#CCCCCC': '#303134', '#AAAAAA': '#5F6368',
     '#888888': '#6B7280', '#424242': '#4B5563', '#555555': '#6B7280',
+    '#FFB74D': '#8A4B00',
 }
+
+
+def viewer_window_bounds(parent, screen_w, screen_h):
+    """Return the viewer's size and position without mutating the main window."""
+    width, height = parent.winfo_width(), parent.winfo_height()
+    try:
+        maximized = (parent.state() == 'zoomed'
+                     or bool(parent.attributes('-fullscreen')))
+    except tk.TclError:
+        maximized = False
+    # The macOS native green fullscreen button is not always reported by Tk
+    # as -fullscreen; the mapped dimensions provide a second, portable signal.
+    large_parent = (width >= screen_w * .88 and height >= screen_h * .80)
+    if (maximized or large_parent) and width > 100 and height > 100:
+        return (width, height, parent.winfo_rootx(), parent.winfo_rooty())
+    window_w = min(1400, max(760, screen_w - 80))
+    window_h = min(950, max(520, screen_h - 120))
+    return (window_w, window_h,
+            max(0, (screen_w - window_w) // 2),
+            max(0, (screen_h - window_h) // 2 - 10))
+
+
+def mac_parent_is_fullscreen(parent, screen_w, screen_h):
+    """Recognize both Tk fullscreen and the native macOS fullscreen Space."""
+    try:
+        if bool(parent.attributes('-fullscreen')):
+            return True
+    except tk.TclError:
+        pass
+    return (parent.winfo_rootx() <= 0 and parent.winfo_rooty() <= 0
+            and parent.winfo_width() >= screen_w * .98
+            and parent.winfo_height() >= screen_h * .90)
 
 # macOS 的 Aqua 原生 Button 会忽略自定义 background，却保留 foreground。
 # 如果仍使用白色文字，就会出现白底白字。所有按钮统一通过 create_button
@@ -1780,17 +1813,20 @@ class FullScreenViewer:
         # 创建顶层窗口
         self.window = tk.Toplevel(parent)
         self.window.title(f"🔍 {os.path.basename(file_path)}")
-        # 按可用屏幕居中，并在四周留出余量，避免任务栏/程序坞遮住底部控件。
-        self.window.update_idletasks()
+        # 主窗口占满屏幕时查看器也使用主窗口的完整可见区域。
+        # 只修改新建的 Toplevel，绝不调整主窗口的 geometry/state。
         screen_w = max(800, self.window.winfo_screenwidth())
         screen_h = max(600, self.window.winfo_screenheight())
-        window_w = min(1400, max(760, screen_w - 80))
-        window_h = min(950, max(520, screen_h - 120))
-        window_x = max(0, (screen_w - window_w) // 2)
-        window_y = max(0, (screen_h - window_h) // 2 - 10)
+        window_w, window_h, window_x, window_y = viewer_window_bounds(parent, screen_w, screen_h)
         self.window.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
         self.window.configure(bg='#111111')
         self.window.minsize(600, 400)
+        if sys.platform == 'darwin' and mac_parent_is_fullscreen(parent, screen_w, screen_h):
+            try:
+                # Geometry alone leaves the title bar outside a fullscreen Space.
+                self.window.attributes('-fullscreen', True)
+            except tk.TclError:
+                pass  # The parent-sized geometry still provides a usable viewer.
         
         # ESC关闭
         self.window.bind('<Escape>', lambda e: self._close())
@@ -2607,7 +2643,15 @@ class WildCamSorter:
             return 'dark' if system_uses_dark_theme() else 'light'
         return mode if mode in ('light', 'dark') else 'dark'
 
-    def _apply_theme(self, mode: str, persist: bool = True):
+    def _theme_color(self, dark_color: str) -> str:
+        """Resolve status colors written after the current theme was applied."""
+        resolved = getattr(self, '_active_theme',
+                           self._resolved_theme(self.settings.get('theme', 'system')))
+        if resolved == 'light':
+            return THEME_DARK_TO_LIGHT.get(dark_color.upper(), dark_color)
+        return dark_color
+
+    def _apply_theme(self, mode: str, persist: bool = True, window=None):
         """即时切换现有Tk控件颜色，并保存用户选择。"""
         resolved = self._resolved_theme(mode)
         reverse = {value.upper(): key for key, value in THEME_DARK_TO_LIGHT.items()}
@@ -2635,7 +2679,7 @@ class WildCamSorter:
             for child in widget.winfo_children():
                 visit(child)
 
-        visit(self.root)
+        visit(self.root if window is None else window)
         self._active_theme = resolved
         self.settings['theme'] = mode
         if persist:
@@ -2773,13 +2817,13 @@ class WildCamSorter:
         self.control_frame.grid(row=2, column=0, sticky='ew')
         self.control_frame.grid_propagate(False)  # 固定高度约130px
         
-        # 使用内部 frame 来居中排列按钮
+        # 分类和导航各占一行，缩窄窗口时导航仍完整可见。
         inner = tk.Frame(self.control_frame, bg='#1A1A1A')
-        inner.pack(fill=tk.BOTH, expand=True, padx=15, pady=8)
+        inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         
         # --- 左侧：分类按钮 ---
         left_frame = tk.Frame(inner, bg='#1A1A1A')
-        left_frame.pack(side=tk.LEFT, fill=tk.Y)
+        left_frame.pack(side=tk.TOP, fill=tk.X)
         
         # 空拍按钮
         self.btn_empty = create_button(
@@ -2789,10 +2833,6 @@ class WildCamSorter:
             command=self._on_empty
         )
         self.btn_empty.pack(side=tk.LEFT, padx=4)
-        
-        # 物种按钮容器
-        self.species_frame = tk.Frame(left_frame, bg='#1A1A1A')
-        self.species_frame.pack(side=tk.LEFT, padx=4)
         
         # 多类别切换按钮
         self.multi_mode = False
@@ -2813,17 +2853,35 @@ class WildCamSorter:
             command=self._on_new_species
         )
         self.btn_new.pack(side=tk.LEFT, padx=4)
+
+        # Species names and their count are user-defined: scroll this part
+        # horizontally instead of allowing it to push navigation off-screen.
+        species_container = tk.Frame(left_frame, bg='#1A1A1A')
+        species_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
+        self.species_canvas = tk.Canvas(species_container, bg='#1A1A1A',
+                                        height=43, highlightthickness=0)
+        self.species_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
+        species_scroll = tk.Scrollbar(species_container, orient=tk.HORIZONTAL,
+                                      command=self.species_canvas.xview)
+        species_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.species_canvas.configure(xscrollcommand=species_scroll.set)
+        self.species_frame = tk.Frame(self.species_canvas, bg='#1A1A1A')
+        self.species_canvas.create_window((0, 0), window=self.species_frame,
+                                          anchor=tk.NW)
+        self.species_frame.bind('<Configure>', lambda _event:
+                                self.species_canvas.configure(
+                                    scrollregion=self.species_canvas.bbox('all')))
         
         # --- 右侧：导航 + 信息 ---
         right_frame = tk.Frame(inner, bg='#1A1A1A')
-        right_frame.pack(side=tk.RIGHT, fill=tk.Y)
+        right_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         
         # 组信息
         self.label_group_info = tk.Label(
             right_frame, text="等待加载...", font=("微软雅黑", 10),
             bg='#1A1A1A', fg=COLOR_TEXT
         )
-        self.label_group_info.pack(side=tk.LEFT, padx=10)
+        self.label_group_info.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         
         # 上一组
         self.btn_prev = create_button(
@@ -2863,10 +2921,11 @@ class WildCamSorter:
         
         # --- 选中状态提示 ---
         self.label_select_hint = tk.Label(
-            inner, text="已选 4/4", font=("微软雅黑", 9),
+            right_frame, text="已选 4/4", font=("微软雅黑", 9),
             bg='#1A1A1A', fg=COLOR_TEXT_DIM
         )
-        self.label_select_hint.pack(side=tk.RIGHT, padx=15)
+        self.label_select_hint.pack(side=tk.LEFT, padx=6,
+                                    before=self.label_group_info)
         
         # 初始化物种按钮占位
         self._rebuild_species_buttons()
@@ -3098,7 +3157,7 @@ class WildCamSorter:
 
         self._finish_background_scan_ui()
         if terminal[1] == 'cancelled':
-            self.label_status.config(text="已取消扫描，原数据未发生变化", fg='#FFB74D')
+            self.label_status.config(text="已取消扫描，原数据未发生变化", fg=self._theme_color('#FFB74D'))
             return
         if terminal[1] == 'error':
             _, _, error_text, details = terminal
@@ -3145,7 +3204,7 @@ class WildCamSorter:
 
         if not self.groups:
             self.label_stats.config(text="无媒体文件")
-            self.label_status.config(text="未找到可识别的媒体文件", fg='#FFB74D')
+            self.label_status.config(text="未找到可识别的媒体文件", fg=self._theme_color('#FFB74D'))
             messagebox.showwarning(
                 "未找到媒体文件",
                 "在选定文件夹中未找到可识别的视频或图片文件。"
@@ -3215,7 +3274,7 @@ class WildCamSorter:
             # 用户取消：保持空状态，提示可用工具栏按钮
             self.label_status.config(
                 text="未选择路径，可点工具栏「⚙ 路径与模式」随时开始",
-                fg='#FFB74D'
+                fg=self._theme_color('#FFB74D')
             )
     
     def _on_panels_ready(self, group_index: int, skipped: int = 0):
@@ -3225,7 +3284,7 @@ class WildCamSorter:
         if skipped > 0:
             self.label_status.config(
                 text=f"⏭ 已跳过 {skipped} 个已处理组，从第 {group_index + 1} 组开始",
-                fg='#FFB74D'
+                fg=self._theme_color('#FFB74D')
             )
         self._update_progress_bar()
         self._update_status()
@@ -3525,11 +3584,11 @@ class WildCamSorter:
         if is_processed:
             self.label_group_info.config(
                 text=f"📦 第 {group_index + 1}/{len(self.groups)} 组  ⚠ 已处理({prev_species})",
-                fg='#FFB74D'
+                fg=self._theme_color('#FFB74D')
             )
             self.label_status.config(
                 text=f"⚠ 该组已分类为「{prev_species}」。重新分类将自动删除旧文件。",
-                fg='#FFB74D'
+                fg=self._theme_color('#FFB74D')
             )
         else:
             self.label_group_info.config(
@@ -3918,7 +3977,7 @@ class WildCamSorter:
         if panel:
             panel.media_label.config(
                 image='', text=f"⚠ 无法播放{ext}视频\n(可点击查看截图)",
-                fg='#FFB74D'
+                fg=self._theme_color('#FFB74D')
             )
             panel.title_label.config(text=f"{panel.label_text} | ❌ {os.path.basename(video_path)}")
             try:
@@ -4068,7 +4127,9 @@ class WildCamSorter:
         # 创建并打开全分辨率查看器（模态窗口，阻塞直到关闭）
         viewer = FullScreenViewer(self.root, file_path, is_video=is_video)
         if hasattr(self, 'settings'):
-            self._apply_theme(self.settings.get('theme', 'system'), persist=False)
+            # Opening a viewer must not reconfigure the maximized main window.
+            self._apply_theme(self.settings.get('theme', 'system'),
+                              persist=False, window=viewer.window)
         # 等待查看器窗口关闭
         self.root.wait_window(viewer.window)
         
@@ -4122,7 +4183,7 @@ class WildCamSorter:
         if self.multi_mode:
             # 当前在多类模式 → 提交分类
             if not self.multi_selected:
-                self.label_status.config(text="⚠ 请先选择至少一个物种类别", fg='#FFB74D')
+                self.label_status.config(text="⚠ 请先选择至少一个物种类别", fg=self._theme_color('#FFB74D'))
                 return
             if not self.current_group_files:
                 return
@@ -4209,7 +4270,7 @@ class WildCamSorter:
         所有操作都是复制（shutil.copy2），原始文件保留不动。
         """
         if self._scan_thread is not None and self._scan_thread.is_alive():
-            self.label_status.config(text="正在切换数据文件夹，请等待扫描完成", fg='#FFB74D')
+            self.label_status.config(text="正在切换数据文件夹，请等待扫描完成", fg=self._theme_color('#FFB74D'))
             return
         if not self.current_group_files or not self.target_dir:
             self.label_status.config(
@@ -4668,21 +4729,14 @@ class WildCamSorter:
                 bg='#1A1A1A', fg=COLOR_TEXT_DIM
             )
             lbl.pack(side=tk.LEFT, padx=4)
+            if hasattr(self, '_active_theme'):
+                self._apply_theme(self.settings.get('theme', 'system'),
+                                  persist=False, window=self.species_frame)
             return
         
-        # 自动换行：每行最多7个按钮，超出换到下一行
-        MAX_PER_ROW = 7
-        # 创建行容器
-        row_frames = []
-        for i, name in enumerate(self.species_list):
-            row_idx = i // MAX_PER_ROW
-            if row_idx >= len(row_frames):
-                row_frame = tk.Frame(self.species_frame, bg='#1A1A1A')
-                row_frame.pack(fill=tk.X, pady=1)
-                row_frames.append(row_frame)
-            
+        for name in self.species_list:
             btn = create_button(
-                row_frames[row_idx],
+                self.species_frame,
                 text=name,
                 font=("微软雅黑", 11),
                 bg=COLOR_BUTTON_SPECIES, fg='white',
@@ -4701,6 +4755,9 @@ class WildCamSorter:
         for panel in self.overflow_panels:
             if hasattr(panel, 'rebuild_mini_buttons'):
                 panel.rebuild_mini_buttons(self.species_list)
+        if hasattr(self, '_active_theme'):
+            self._apply_theme(self.settings.get('theme', 'system'),
+                              persist=False, window=self.species_frame)
     
     # ==================== 导航 ====================
     
@@ -4762,7 +4819,7 @@ class WildCamSorter:
             query = state['query']
             self._jump_search_state = None
             self.btn_jump_to_media.config(state=tk.NORMAL, text="跳转至")
-            self.label_status.config(text=f"没有找到序号或文件名：{query}", fg='#FFB74D')
+            self.label_status.config(text=f"没有找到序号或文件名：{query}", fg=self._theme_color('#FFB74D'))
             messagebox.showinfo("未找到", f"没有找到序号或文件名：{query}")
             return
 

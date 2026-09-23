@@ -77,6 +77,96 @@ class FullScreenViewerTests(unittest.TestCase):
 
 
 class PlatformCompatibilityTests(unittest.TestCase):
+    def test_viewer_fills_macos_fullscreen_parent_without_resizing_it(self):
+        parent = MagicMock()
+        parent.winfo_width.return_value = 1920
+        parent.winfo_height.return_value = 1080
+        parent.winfo_rootx.return_value = 0
+        parent.winfo_rooty.return_value = 0
+        parent.state.return_value = 'normal'
+        parent.attributes.return_value = True
+        self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
+                         (1920, 1080, 0, 0))
+        parent.geometry.assert_not_called()
+        parent.state.assert_called_once_with()
+        self.assertTrue(wildcam_sorter.mac_parent_is_fullscreen(parent, 1920, 1080))
+
+    def test_viewer_fills_windows_maximized_parent_and_macos_native_zoom(self):
+        parent = MagicMock()
+        parent.winfo_width.return_value = 1800
+        parent.winfo_height.return_value = 950
+        parent.winfo_rootx.return_value = 10
+        parent.winfo_rooty.return_value = 15
+        parent.state.return_value = 'zoomed'
+        parent.attributes.return_value = False
+        self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
+                         (1800, 950, 10, 15))
+        self.assertFalse(wildcam_sorter.mac_parent_is_fullscreen(parent, 1920, 1080))
+        parent.state.return_value = 'normal'
+        self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
+                         (1800, 950, 10, 15))
+
+    def test_native_mac_fullscreen_detected_if_tk_flag_not_set(self):
+        parent = MagicMock()
+        parent.winfo_width.return_value = 1920
+        parent.winfo_height.return_value = 1024
+        parent.winfo_rootx.return_value = 0
+        parent.winfo_rooty.return_value = 0
+        parent.attributes.return_value = False
+        self.assertTrue(wildcam_sorter.mac_parent_is_fullscreen(parent, 1920, 1080))
+
+    def test_viewer_stays_centered_for_small_parent(self):
+        parent = MagicMock()
+        parent.winfo_width.return_value = 1000
+        parent.winfo_height.return_value = 700
+        parent.state.return_value = 'normal'
+        parent.attributes.return_value = False
+        self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
+                         (1400, 950, 260, 55))
+
+    def test_warning_color_changes_with_theme_even_for_later_messages(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app.settings = {'theme': 'light'}
+        app._active_theme = 'light'
+        self.assertEqual(app._theme_color('#FFB74D'), '#8A4B00')
+        app._active_theme = 'dark'
+        self.assertEqual(app._theme_color('#FFB74D'), '#FFB74D')
+
+    def test_rebuilding_species_avoids_dark_rows_in_light_theme(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app.species_frame = MagicMock()
+        app.species_frame.winfo_children.return_value = []
+        app.species_buttons = {}
+        app.species_list = ['牛', '羊']
+        app._panels = []
+        app.overflow_panels = []
+        app._active_theme = 'light'
+        app.settings = {'theme': 'light'}
+        app._apply_theme = MagicMock()
+        with patch.object(wildcam_sorter, 'create_button') as button_factory, \
+                patch.object(wildcam_sorter.tk, 'Frame') as frame_factory:
+            app._rebuild_species_buttons()
+        self.assertEqual(button_factory.call_count, 2)
+        self.assertTrue(all(call.args[0] is app.species_frame
+                            for call in button_factory.call_args_list))
+        frame_factory.assert_not_called()
+        app._apply_theme.assert_called_once_with('light', persist=False,
+                                                  window=app.species_frame)
+
+    def test_opening_viewer_only_themes_the_viewer_not_the_parent(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app.current_group_files = ['/tmp/1.jpg']
+        app.root = MagicMock()
+        app.settings = {'theme': 'light'}
+        app.video_playing = False
+        app._apply_theme = MagicMock()
+        viewer = MagicMock()
+        with patch.object(wildcam_sorter, 'FullScreenViewer', return_value=viewer):
+            app._open_fullscreen(0)
+        app._apply_theme.assert_called_once_with('light', persist=False,
+                                                  window=viewer.window)
+        app.root.geometry.assert_not_called()
+
     def test_macos_native_buttons_use_dark_readable_text(self):
         button = MagicMock()
 
