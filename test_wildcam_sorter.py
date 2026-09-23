@@ -238,6 +238,78 @@ class PlatformCompatibilityTests(unittest.TestCase):
             self.assertEqual(wildcam_sorter._windows_short_path('/tmp/测试.mp4'), '')
 
 
+class CaptureSuggestionTests(unittest.TestCase):
+    def test_suggests_two_contiguous_camera_modes(self):
+        pattern = 'viii' * 50 + 'iiiv' * 100
+        names = [f'{n:04d}.' + ('mp4' if kind == 'v' else 'jpg')
+                 for n, kind in enumerate(pattern, 1)]
+        segments = wildcam_sorter.suggest_capture_segments(names)
+        self.assertEqual([(s['start'], s['end'], s['order']) for s in segments], [
+            (1, 200, wildcam_sorter.ORDER_VIDEOS_FIRST),
+            (201, 600, wildcam_sorter.ORDER_PHOTOS_FIRST),
+        ])
+
+    def test_does_not_guess_photos_per_group_from_photos_only(self):
+        self.assertEqual(wildcam_sorter.suggest_capture_segments(
+            [f'{n:03d}.jpg' for n in range(100)]), [])
+
+    def test_ranges_are_disjoint_and_use_file_ordinals(self):
+        names = ['001.mp4', '002.jpg', '003.jpg', '004.jpg',
+                 '005.jpg', '006.mp4', '007.jpg', '008.jpg',
+                 '009.mp4', '010.jpg', '011.jpg', '012.jpg',
+                 '013.jpg', '014.mp4', '015.jpg', '016.jpg']
+        groups = wildcam_sorter.RangedMediaGroupSequence('/tmp', names, [{
+            'start': 1, 'end': 16, 'photo_count': 3, 'video_count': 1,
+            'order': wildcam_sorter.ORDER_VIDEOS_FIRST,
+        }])
+        count, ranges = wildcam_sorter.capture_mismatch_ranges(groups)
+        self.assertEqual((count, ranges), (2, [(5, 8), (13, 16)]))
+
+    def test_ignores_macos_appledouble_files_when_scanning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ('001.mp4', '002.jpg', '._003.mp4', '003.jpg'):
+                open(os.path.join(folder, name), 'wb').close()
+            scanned = wildcam_sorter.scan_and_group_files(folder)
+            self.assertEqual(scanned.file_names, ['001.mp4', '002.jpg', '003.jpg'])
+
+    def test_seek_requests_decode_without_blocking_tk_thread(self):
+        viewer = FullScreenViewer.__new__(FullScreenViewer)
+        viewer._video_duration = 120
+        viewer.video_progress_var = MagicMock()
+        viewer.video_progress_var.get.return_value = 45
+        viewer._video_commands = wildcam_sorter.queue.Queue()
+        viewer._seeking = True
+        viewer._video_cap = MagicMock()
+        viewer._on_seek_end()
+        self.assertEqual(viewer._video_commands.get_nowait(), ('seek', 45))
+        viewer._video_cap.set.assert_not_called()
+        viewer._video_cap.read.assert_not_called()
+
+    def test_decoder_catches_up_to_wall_clock_when_frames_are_late(self):
+        commands, results = wildcam_sorter.queue.Queue(), wildcam_sorter.queue.Queue(maxsize=3)
+        stopped = threading.Event()
+        capture = MagicMock()
+        capture.get.side_effect = lambda prop: {11: 25, 12: 1000, 13: 0}.get(prop, 0)
+        def read_one():
+            stopped.set()
+            return True, object()
+        capture.read.side_effect = read_one
+        with patch.object(wildcam_sorter, 'open_video_capture', return_value=capture), \
+             patch.object(wildcam_sorter.cv2, 'CAP_PROP_FPS', 11, create=True), \
+             patch.object(wildcam_sorter.cv2, 'CAP_PROP_FRAME_COUNT', 12, create=True), \
+             patch.object(wildcam_sorter.cv2, 'CAP_PROP_POS_FRAMES', 13, create=True), \
+             patch.object(wildcam_sorter.cv2, 'CAP_PROP_POS_MSEC', 14, create=True), \
+             patch.object(wildcam_sorter.cv2, 'COLOR_BGR2RGB', 15, create=True), \
+             patch.object(wildcam_sorter.cv2, 'cvtColor', return_value=object(), create=True), \
+             patch.object(wildcam_sorter.Image, 'fromarray', return_value=MagicMock()), \
+             patch.object(wildcam_sorter.time, 'monotonic', side_effect=[0, 4, 4, 4]):
+            FullScreenViewer._viewer_decode_worker('/camera/video.mp4', commands,
+                                                    results, stopped)
+        capture.set.assert_any_call(14, 4000)
+        capture.release.assert_called_once()
+
+
+
 class PreviewPipelineTests(unittest.TestCase):
     def _make_app(self):
         app = WildCamSorter.__new__(WildCamSorter)
@@ -260,9 +332,10 @@ class PreviewPipelineTests(unittest.TestCase):
         app.root.after.return_value = 'after-id'
         return app
 
-    def test_four_image_workers_and_a_separate_video_worker_are_configured(self):
+    def test_default_preview_workers_have_two_video_decoders(self):
         self.assertEqual(wildcam_sorter.IMAGE_PREVIEW_WORKERS, 4)
-        self.assertEqual(wildcam_sorter.VIDEO_PREVIEW_WORKERS, 1)
+        self.assertEqual(wildcam_sorter.VIDEO_PREVIEW_WORKERS, 2)
+
 
     def test_image_and_video_previews_use_separate_queues(self):
         app = self._make_app()

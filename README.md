@@ -1,6 +1,6 @@
-# WildCam Sorter v1.10.3 — 红外相机照片与视频分类器 / Trail-camera Photo & Video Sorter
+# WildCam Sorter v1.11 — 红外相机照片与视频分类器 / Trail-camera Photo & Video Sorter
 
-[中文](#中文说明) · [English](#english-guide) · [下载 / Downloads](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.10.3) · [本版源码 / Source](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10.3)
+[中文](#中文说明) · [English](#english-guide) · [下载 / Downloads](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11) · [本版源码 / Source](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11)
 
 ---
 
@@ -9,13 +9,21 @@
 
 ### 简介
 
-改善查看器、连续高速分类与稳定性，增加多范围拍摄模式、双进度条、主题设置和人工分类补录。1.10.3 汇总了此前直接覆盖到 1.10、未单独建分支或 Release 的 Mac 修复，并修复本次报告的界面问题。
+改善查看器、连续高速分类与稳定性，增加多范围拍摄模式、双进度条、主题设置和人工分类补录。1.11 增加模式识别与错误文件序号诊断、媒体时间、可配置的性能档位以及离线双语教程，并改进视频播放器。
 
 WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。它按组预览照片和视频，把选中的文件复制到物种类别目录，并保存进度和 CSV。原始输入文件不会被移动或改写。
 
 ### 本版本主要功能
 
-#### 1.10.3 修复汇总（含此前覆盖在 1.10 的修复）
+#### 1.11 新增与修复
+
+- 自动分析连续的照片 + 视频拍摄模式；若样本不足或仅有照片，则请手动指定拍摄模式。发现错误组时逐段列出准确的文件序号范围，点击“重选择模式”会预填检测出的候选模式（请核对）。
+- 每个媒体窗格显示文件名与文件系统创建时间；没有创建时间的系统显示“修改时间”。扫描时跳过 macOS `._` 附属文件，不再把它们当作照片或视频。
+- 主页面默认增加到 2 个视频预览线程；单独视频播放器把解码、跳转和追帧放在后台线程，拖动进度条不会阻塞主界面。视频解码取决于摄像机编码、硬盘和机器性能。
+- 设置里增加“省内存 / 均衡 / 快速”预设与图片线程、视频线程、缩略图缓存 MB、下一组图片预读开关；保存后**重启生效**，分类复制及 CSV 保持单线程按顺序执行。
+- 设置中的离线“教程（阅读模式）”提供中英切换、章节目录、字号调整和可点击的 HTTP(S) 链接，内容来自随便携包提供的本地 README。
+
+#### 1.10.3 修复汇总（延续保留）
 
 - **此前的 Mac 修复**：修复 macOS Aqua 按钮白底白字；主界面采用 4 个图片后台线程和独立的视频线程，修复慢预览及最后一格预览任务停止轮询，并预读下一组缩略图。
 - **本次的跨平台修复**：分类按钮与上一组／跳转至／下一组等导航按钮分行排列；物种按钮可横向滚动，小窗口也能找到全部按钮；浅色主题的黄色提示文字自动变为深琥珀色，黑色主题保留亮黄色，后续新出现的提示同样跟随主题；修复增减物种按钮后分类栏偶现深色块。
@@ -33,7 +41,7 @@ WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。�
 
 #### Windows 10/11 64 位
 
-1. 前往 [v1.10.3 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.10.3) 下载 Windows Portable 压缩包。
+1. 前往 [v1.11 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11) 下载 Windows Portable 压缩包。
 2. **完整解压** ZIP；不要直接在压缩包预览窗口中运行。
 3. 双击 `WildCamSorter.exe`。便携版不需要安装 Python。
 
@@ -109,7 +117,7 @@ python wildcam_sorter.py
 
 - Python、tkinter、Pillow、OpenCV
 - 打包：PyInstaller
-- 源码分支：[1.10.3](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10.3)
+- 源码分支：[1.11](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11)
 - 作者：Siyuan ZHU
 
 ---
@@ -119,13 +127,21 @@ python wildcam_sorter.py
 
 ### Overview
 
-Improves the viewer, rapid continuous sorting, and stability, while adding ranged capture patterns, dual progress bars, themes, and recovery of manually sorted files. Version 1.10.3 also documents earlier Mac fixes applied directly to 1.10 without a separate branch or release.
+Improves the viewer, rapid continuous sorting, and stability, while adding ranged capture patterns, dual progress bars, themes, and recovery of manually sorted files. Version 1.11 adds camera mode suggestions, exact mismatch file ranges, filesystem timestamps, configurable performance and an offline bilingual reader, and improves video playback.
 
 WildCam Sorter is a local desktop tool for classifying trail-camera photos and videos. It previews media in groups, copies selected files into species folders, and records progress and CSV data. Original input files are never moved or modified.
 
 ### Highlights in this release
 
-#### 1.10.3 fixes, including earlier changes made directly to 1.10
+#### 1.11 additions and fixes
+
+- Detect likely repeated mixed photo/video capture patterns, report exact file ordinal ranges of mismatches, and prefill suggested modes when choosing “重选择模式” (verify the suggestions). Photo-only footage cannot reveal the number of photos per trigger.
+- Show the file name and filesystem creation time in each pane (modification time where birth time is unavailable). Ignore macOS AppleDouble `._` sidecar files during scans.
+- Two video preview workers by default; fullscreen video decoding, seeking and catching up with the media clock now run in a background worker. Actual playback depends on codecs, storage and hardware.
+- Choose Low memory / Balanced / Fast settings, or configure image and video preview workers, thumbnail cache size and next-group prefetch; **restart to apply**. Copying and CSV writes stay on one ordered worker.
+- The offline bilingual README reader renders headings and lists, clickable HTTP(S) links, a table of contents, a language switch and adjustable text size.
+
+#### 1.10.3 fixes carried forward
 
 - **Earlier Mac fixes:** Readable macOS Aqua button text; four image preview workers and one separate video worker; fixed polling for the final pending preview and added prefetching for the next group.
 - **New cross-platform fixes:** Classification and navigation occupy separate rows. A horizontal scrollbar keeps any number of species buttons accessible in a small window. Yellow warning text becomes dark amber in the light theme and stays bright yellow in the dark theme, including warnings displayed after switching themes. Rebuilding species buttons no longer leaves dark blocks in the light theme.
@@ -219,5 +235,5 @@ Sorting primarily copies files, so original photos and videos remain in the inpu
 
 - Python, tkinter, Pillow, and OpenCV
 - Packaging: PyInstaller
-- Source branch: [1.10.3](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10.3)
+- Source branch: [1.11](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11)
 - Author: Siyuan ZHU

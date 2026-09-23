@@ -1,0 +1,215 @@
+name: Release WildCam Sorter v1.11
+
+on:
+  push:
+    branches:
+      - '1.11'
+    paths:
+      - 'wildcam_sorter.py'
+      - 'requirements.txt'
+      - 'test_wildcam_sorter.py'
+      - 'WildCamSorter.spec'
+      - 'WildCamSorter-macOS.spec'
+      - 'macOS使用说明.txt'
+      - 'README.md'
+      - '.github/workflows/release-v1.11.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64 Portable
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.10,<7" "pillow>=10,<13" "opencv-python>=4.10,<5" "numpy>=2,<3" "av>=13,<17"
+
+      - name: Run automated tests
+        run: python -m unittest -v
+
+      - name: Build executable
+        run: pyinstaller --noconfirm --clean WildCamSorter.spec
+
+      - name: Create Windows Portable ZIP
+        shell: pwsh
+        run: |
+          $package = "WildCamSorter_Windows_v1.11_Portable"
+          New-Item -ItemType Directory -Path $package | Out-Null
+          Copy-Item "dist/WildCamSorter.exe" "$package/WildCamSorter.exe"
+          Copy-Item "README.md" "$package/README.md"
+          @(
+            "WildCam Sorter v1.11"
+            "Windows 10/11 x64 Portable"
+            "Complete extraction is required; Python is not required."
+          ) | Set-Content "$package/版本信息.txt" -Encoding UTF8
+          Compress-Archive -Path $package -DestinationPath "$package.zip"
+          $hash = (Get-FileHash "$package.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $package.zip" | Set-Content "$package.zip.sha256" -Encoding ascii
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            WildCamSorter_Windows_v1.11_Portable.zip
+            WildCamSorter_Windows_v1.11_Portable.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS ${{ matrix.package_arch }} Portable
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            machine_arch: arm64
+            package_arch: AppleSilicon
+          - runner: macos-15-intel
+            machine_arch: x86_64
+            package_arch: Intel
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Verify native runner and Tk
+        env:
+          EXPECTED_ARCH: ${{ matrix.machine_arch }}
+        run: |
+          python - <<'PY'
+          import os
+          import platform
+          import tkinter
+
+          actual = platform.machine()
+          expected = os.environ['EXPECTED_ARCH']
+          print(f'Python architecture: {actual}')
+          print(f'Tk version: {tkinter.TkVersion}')
+          if actual != expected:
+              raise SystemExit(f'Expected {expected}, got {actual}')
+          PY
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.10,<7" "pillow>=10,<13" "opencv-python>=4.10,<5" "numpy>=2,<3" "av>=13,<17"
+
+      - name: Run automated tests
+        run: python -m unittest -v
+
+      - name: Build native application bundle
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: pyinstaller --noconfirm --clean WildCamSorter-macOS.spec
+
+      - name: Verify application architecture and signature
+        env:
+          EXPECTED_ARCH: ${{ matrix.machine_arch }}
+        run: |
+          test -d dist/WildCamSorter.app
+          APP_BINARY="dist/WildCamSorter.app/Contents/MacOS/WildCamSorter"
+          file "$APP_BINARY"
+          file "$APP_BINARY" | grep -q "$EXPECTED_ARCH"
+          codesign --verify --deep --strict --verbose=2 dist/WildCamSorter.app
+
+      - name: Create macOS Portable ZIP
+        env:
+          PACKAGE_ARCH: ${{ matrix.package_arch }}
+        run: |
+          PACKAGE_NAME="WildCamSorter_macOS_${PACKAGE_ARCH}_v1.11_Portable"
+          mkdir "$PACKAGE_NAME"
+          ditto dist/WildCamSorter.app "$PACKAGE_NAME/WildCamSorter.app"
+          cp macOS使用说明.txt "$PACKAGE_NAME/macOS使用说明.txt"
+          cp README.md "$PACKAGE_NAME/README.md"
+          ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_NAME" "$PACKAGE_NAME.zip"
+          shasum -a 256 "$PACKAGE_NAME.zip" > "$PACKAGE_NAME.zip.sha256"
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.package_arch }}
+          path: |
+            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.11_Portable.zip
+            WildCamSorter_macOS_${{ matrix.package_arch }}_v1.11_Portable.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - windows
+      - macos
+
+    steps:
+      - name: Check out release target
+        uses: actions/checkout@v4
+
+      - name: Download all native packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          set -euo pipefail
+          test "$(find release-assets -maxdepth 1 -name '*.zip' | wc -l)" -eq 3
+          (cd release-assets && sha256sum -c *.sha256)
+          ls -lh release-assets
+
+      - name: Publish v1.11 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## WildCam Sorter v1.11
+
+          本版本加入拍摄模式建议、不符合模式的准确文件序号范围、每个窗格的文件创建时间、可配置的性能档位、离线双语教程阅读模式，并改进视频播放速度和进度条响应。详情见压缩包中的中英双语 README。
+
+          This update adds camera pattern suggestions, exact mismatch ranges, file timestamps, performance presets and an offline bilingual README reader; it also improves fullscreen video playback and seeking responsiveness.
+
+          ### 下载选择
+
+          - Windows 10/11 64 位：`WildCamSorter_Windows_v1.11_Portable.zip`
+          - Apple M 系列芯片：`WildCamSorter_macOS_AppleSilicon_v1.11_Portable.zip`
+          - Intel 芯片 Mac：`WildCamSorter_macOS_Intel_v1.11_Portable.zip`
+
+          三个压缩包均包含 README；macOS 包另含详细安装说明。全部版本均无需安装 Python。
+          EOF
+
+          if gh release view v1.11 >/dev/null 2>&1; then
+            gh release upload v1.11 release-assets/*.zip --clobber
+          else
+            gh release create v1.11 release-assets/*.zip \
+              --target "$GITHUB_SHA" \
+              --title "WildCam Sorter v1.11" \
+              --notes-file release-notes.md \
+              --latest
+          fi
+
