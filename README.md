@@ -19,6 +19,8 @@ WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。�
 
 - 长按类别按钮约 0.6 秒进入编辑模式；拖动按钮调整顺序，右上角的 × 可删除类别。删除时先选择另一个类别或“空拍”接收全部分类文件；迁移同步修改 CSV 与进度记录。若目标有同名且内容不同的文件，迁移会中止，不会覆盖。原始输入文件不会变动。
 - 3、4、5、6 等数量的组按文件数自适应排版；3 和 5 个文件时把视频放在较大的预览位。每页最多显示 9 个媒体；组内更多文件可翻页。照片和视频保持原始比例，文件名与时间在同一行，没有超出范围时隐藏类别横向滚动条。
+- **预览补丁**：修复下一组的小缩略图停留在大窗格中央的问题；先展示预读图，再根据实际窗格尺寸加载清晰大图。5 张全是照片时改用上三下二排版；设置中可随时切换为各媒体等大排列。
+- **编辑动画与 Mac 选项卡**：长按后可将类别按钮跟随鼠标拖动，其他按钮平滑滑入新位置，编辑中的按钮轻微摆动；松开后才保存排列。Mac 的媒体选项卡增加“×”，点击即可返回分类页。
 - 设置中的“界面字号”可以在 80%–150% 之间调整；性能设置允许图片线程最多 12 个、视频预览线程最多 6 个、缩略图缓存上限 4096 MB，预设分别提供 256 / 512 / 2048 MB，性能设置重启生效。高速浏览时复用预览面板和下一组首帧缓存。
 - Windows 单独查看窗口缩小到屏幕内的保守尺寸；Mac 查看器使用主窗口内的“分类”页返回，不另开改变全屏尺寸的窗口。单独视频默认 0.5× 并可按空格暂停/继续；主页面视频自动播放，目标为 5×，限制每秒渲染帧数以避免无谓的持续解码。
 - 主分类页按空格分类为“空拍”，按左右键切换上一组/下一组；在查看器内空格仍控制播放。需要实际流畅播放的速度取决于视频编码、磁盘和设备能力。
@@ -145,6 +147,8 @@ WildCam Sorter is a local desktop tool for classifying trail-camera photos and v
 
 - Press and hold a species button for about 0.6 seconds to enter edit mode. Drag to reorder, or use × to delete after choosing another category or Empty as the destination. The migration updates output files, CSV, and saved progress; conflicting filenames with different contents abort safely. Original input media is unchanged.
 - The preview grid adapts to 3, 4, 5, 6 and other group sizes, giving video a larger cell for groups of 3 or 5. Up to nine files are shown per page, with paging for larger groups. Previews retain their aspect ratio; filenames and timestamps share a header row; the category scrollbar appears only if necessary.
+- **Preview fix:** An undersized prefetched thumbnail now appears immediately while a correctly sized, sharp image loads in the background. Five photo-only files use a three-above-two layout; an equal-size layout can be selected at any time in Settings.
+- **Animated editing and Mac tab:** The held category button follows the pointer, neighboring buttons slide into place, and edit-mode buttons gently wiggle. The order is saved on release. The Mac media tab now has an × close control to return to sorting.
 - Scale the whole UI font from 80% to 150%. Configure up to 12 image workers, six video preview workers, and 4096 MB of thumbnail cache; memory presets now provide 256 / 512 / 2048 MB. Worker and cache changes take effect on restart. Reusing preview panes and prefetched video first frames improves rapid browsing.
 - The Windows media viewer opens at a smaller on-screen size; the Mac viewer opens in an in-app tab with a Classification return button, retaining native full-screen window state. Standalone videos default to 0.5× and Space toggles playback. Videos in the main grid autoplay at a target 5× with capped rendering to reduce unnecessary CPU work.
 - In the main classification page, Space means Empty and Left/Right arrows navigate groups. In the viewer, Space continues to pause or resume video. Actual smooth playback still depends on codec, storage and hardware.

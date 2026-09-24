@@ -5,6 +5,7 @@ import tempfile
 import threading
 import types
 import unittest
+from types import SimpleNamespace
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -391,6 +392,42 @@ class PreviewPipelineTests(unittest.TestCase):
 
         self.assertLessEqual(preview.width, 600)
         self.assertLessEqual(preview.height, 400)
+
+    def test_prefetched_small_thumbnail_is_shown_then_replaced_at_full_size(self):
+        app = self._make_app()
+        path = '/camera/004.jpg'
+        app._preview_cache[(path, 320, 200)] = wildcam_sorter.Image.new('RGB', (300, 200))
+        panel = MagicMock(index=3)
+        panel._calc_display_size.return_value = (900, 450)
+
+        app._queue_preview(panel, path, 1)
+
+        thumbnail = app._preview_result_queue.get_nowait()
+        self.assertTrue(thumbnail[-1])  # visible immediately, but provisional
+        self.assertEqual(thumbnail[-2], (900, 450))
+        job = app._image_preview_queue.get_nowait()
+        self.assertEqual(job[5:7], (900, 450))
+        self.assertEqual(panel._preview_target_size, (900, 450))
+
+    def test_provisional_preview_does_not_finish_pending_full_size_job(self):
+        app = self._make_app()
+        panel = MagicMock(index=3, file_path='/camera/004.jpg')
+        panel._preview_target_size = (900, 450)
+        app._panel_for_index = MagicMock(return_value=panel)
+        app._preview_pending.add((1, 3, '/camera/004.jpg'))
+        app._preview_pending_images = 1
+        image = wildcam_sorter.Image.new('RGB', (600, 450))
+        preliminary = (1, 3, '/camera/004.jpg', image, None, 'image',
+                       '创建：今天', (900, 450), True)
+        app._preview_result_queue.put(preliminary)
+        with patch.object(wildcam_sorter.ImageTk, 'PhotoImage', return_value=MagicMock()):
+            app._poll_preview_results()
+            self.assertIn((1, 3, '/camera/004.jpg'), app._preview_pending)
+            self.assertEqual(app._preview_pending_images, 1)
+            app._preview_result_queue.put(preliminary[:-1] + (False,))
+            app._poll_preview_results()
+        self.assertFalse(app._preview_pending)
+        self.assertEqual(app._preview_pending_images, 0)
 
 
 class FullscreenDispatchTests(unittest.TestCase):
@@ -790,6 +827,68 @@ class Version112Tests(unittest.TestCase):
         self.assertEqual(five[0], (4, 0, 0, 2, 4))
         self.assertEqual({cell[0] for cell in five}, set(range(5)))
         self.assertEqual(len(wildcam_sorter.media_panel_layout(9)), 9)
+
+    def test_five_photos_use_three_plus_two_and_equal_mode_removes_big_cell(self):
+        normal = wildcam_sorter.media_panel_layout(5)
+        self.assertEqual([(x[1], x[4]) for x in normal],
+                         [(0, 4), (0, 4), (0, 4), (1, 6), (1, 6)])
+        equal = wildcam_sorter.media_panel_layout(5, video_index=4, equal=True)
+        self.assertEqual([item[4] for item in equal], [4] * 5)
+        self.assertEqual(equal[4][0], 4)  # no video promotion in equal mode
+
+    def test_drag_positions_reflow_and_order_is_saved_on_release(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app._editing_categories = True
+        app._migration_pending = False
+        app.settings = {'theme': 'dark'}
+        app._active_theme = 'dark'
+        app._press_after_id = None
+        app._category_drag_name = '狼'
+        app._category_drag_offset = 30
+        app._category_order_changed = False
+        app.species_list = ['狼', '鹿']
+        app._category_widths = {'狼': 80, '鹿': 80}
+        app._category_slot_x = {'狼': 0, '鹿': 86}
+        app._category_visual_x = {'狼': 0, '鹿': 86}
+        app._species_tiles = {'狼': (MagicMock(), MagicMock()),
+                              '鹿': (MagicMock(), MagicMock())}
+        app.species_canvas = MagicMock()
+        app.species_canvas.winfo_rootx.return_value = 0
+        app.species_canvas.winfo_width.return_value = 300
+        app.species_frame = MagicMock()
+        app.species_frame.winfo_rootx.return_value = 0
+        app.species_frame.winfo_width.return_value = 300
+        app.root = MagicMock()
+        app._animate_category_tiles = MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            app.target_dir = directory
+            app._drag_category('狼', SimpleNamespace(x_root=175))
+            self.assertEqual(app.species_list, ['鹿', '狼'])
+            self.assertEqual(app._category_slot_x, {'鹿': 0, '狼': 86})
+            app._end_category_press()
+            self.assertEqual(wildcam_sorter.ordered_categories(
+                directory, ['狼', '鹿']), ['鹿', '狼'])
+        app._animate_category_tiles.assert_called()
+
+    def test_neighbors_slide_toward_target_instead_of_jumping(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app._editing_categories = True
+        app._category_animation_after_id = None
+        app._category_drag_name = '狼'
+        app._category_slot_x = {'鹿': 0, '狼': 86}
+        app._category_visual_x = {'狼': 90.0, '鹿': 86.0}
+        tile = MagicMock()
+        app._species_tiles = {'狼': (MagicMock(), MagicMock()),
+                              '鹿': (tile, MagicMock())}
+        app.root = MagicMock()
+        app.root.after.return_value = 'animation-id'
+
+        app._animate_category_tiles()
+
+        self.assertGreater(app._category_visual_x['鹿'], 0)
+        self.assertLess(app._category_visual_x['鹿'], 86)
+        self.assertEqual(app._category_animation_after_id, 'animation-id')
+        tile.place_configure.assert_called_once()
 
     def test_category_order_persists_and_includes_external_folder(self):
         with tempfile.TemporaryDirectory() as directory:

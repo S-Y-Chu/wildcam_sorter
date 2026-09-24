@@ -170,7 +170,8 @@ def settings_file_path() -> str:
 def load_app_settings() -> dict:
     defaults = {'theme': 'system', 'performance': '均衡',
                 'image_workers': 4, 'video_workers': 2,
-                'cache_mb': 512, 'prefetch_next': True, 'font_scale': 100}
+                'cache_mb': 512, 'prefetch_next': True, 'font_scale': 100,
+                'equal_preview_layout': False}
     try:
         with open(settings_file_path(), 'r', encoding='utf-8') as handle:
             saved = json.load(handle)
@@ -187,6 +188,8 @@ def load_app_settings() -> dict:
                     defaults[name] = value
             if type(saved.get('prefetch_next')) is bool:
                 defaults['prefetch_next'] = saved['prefetch_next']
+            if type(saved.get('equal_preview_layout')) is bool:
+                defaults['equal_preview_layout'] = saved['equal_preview_layout']
     except (OSError, ValueError, TypeError):
         pass
     return defaults
@@ -216,11 +219,13 @@ def media_file_time(file_path: str) -> str:
         return '创建时间不可用'
 
 
-def media_panel_layout(count: int, video_index=None) -> list:
+def media_panel_layout(count: int, video_index=None, equal=False) -> list:
     """Return (local index, row, column, row span, column span) for up to 9 files."""
     if not 1 <= count <= 9:
         raise ValueError('一个页面显示 1–9 个文件')
-    if count == 1:
+    if equal and count in (3, 5, 6):
+        slots = [(i // 3, (i % 3) * 4, 1, 4) for i in range(count)]
+    elif count == 1:
         slots = [(0, 0, 1, 12)]
     elif count == 2:
         slots = [(0, 0, 1, 6), (0, 6, 1, 6)]
@@ -228,6 +233,9 @@ def media_panel_layout(count: int, video_index=None) -> list:
         slots = [(0, 0, 2, 6), (0, 6, 1, 6), (1, 6, 1, 6)]
     elif count == 4:
         slots = [(0, 0, 1, 6), (0, 6, 1, 6),
+                 (1, 0, 1, 6), (1, 6, 1, 6)]
+    elif count == 5 and video_index is None:
+        slots = [(0, 0, 1, 4), (0, 4, 1, 4), (0, 8, 1, 4),
                  (1, 0, 1, 6), (1, 6, 1, 6)]
     elif count == 5:
         slots = [(0, 0, 2, 4), (0, 4, 1, 4), (0, 8, 1, 4),
@@ -239,7 +247,7 @@ def media_panel_layout(count: int, video_index=None) -> list:
     else:
         slots = [(i // 3, (i % 3) * 4, 1, 4) for i in range(count)]
     order = list(range(count))
-    if count in (3, 5) and video_index is not None and 0 <= video_index < count:
+    if not equal and count in (3, 5) and video_index is not None and 0 <= video_index < count:
         order.remove(video_index)
         order.insert(0, video_index)
     return [(order[i], row, col, row_span, col_span)
@@ -271,6 +279,16 @@ def save_category_order(target_dir: str, names: list):
     with open(temp, 'w', encoding='utf-8') as handle:
         json.dump(list(names), handle, ensure_ascii=False)
     os.replace(temp, path)
+
+
+def category_slot_positions(names: list, widths: dict, gap: int = 6) -> dict:
+    """Pixel positions used by the category drag animation."""
+    left = 0
+    positions = {}
+    for name in names:
+        positions[name] = left
+        left += widths[name] + gap
+    return positions
 
 
 def replace_category_label(value: str, old: str, new: str, separator: str) -> str:
@@ -2215,8 +2233,17 @@ class FullScreenViewer:
             tabs = tk.Frame(self.window, bg='#242424', height=34)
             tabs.pack(fill=tk.X)
             create_button(tabs, text='分类', command=self._close, padx=12).pack(side=tk.LEFT)
-            tk.Label(tabs, text=f'  {os.path.basename(file_path)}', bg='#111111',
-                     fg='white', padx=12).pack(side=tk.LEFT, fill=tk.Y)
+            media_tab = tk.Frame(tabs, bg='#1A1A1A')
+            media_tab.pack(side=tk.LEFT, fill=tk.Y, padx=3)
+            tk.Label(media_tab, text=os.path.basename(file_path), bg='#1A1A1A',
+                     fg='white', padx=10).pack(side=tk.LEFT, fill=tk.Y)
+            close_tab = tk.Label(
+                media_tab, text='×', font=('微软雅黑', 12), bg='#1A1A1A',
+                fg='white', cursor='hand2', padx=7)
+            close_tab.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 4))
+            close_tab.bind('<Button-1>', lambda _event: self._close())
+            close_tab.bind('<Enter>', lambda _event: close_tab.configure(bg='#455A64'))
+            close_tab.bind('<Leave>', lambda _event: close_tab.configure(bg='#1A1A1A'))
         else:
             self.window = tk.Toplevel(parent)
             self.window.title(f"🔍 {os.path.basename(file_path)}")
@@ -2879,6 +2906,14 @@ class WildCamSorter:
         self._editing_categories = False
         self._press_after_id = None
         self._category_drag_name = None
+        self._category_drag_offset = 0
+        self._category_widths = {}
+        self._category_slot_x = {}
+        self._category_visual_x = {}
+        self._category_animation_after_id = None
+        self._category_wiggle_after_id = None
+        self._category_wiggle_phase = 0
+        self._category_order_changed = False
         self._migration_pending = False
         self.processed_groups = set()     # 已处理组标识集合
         self.class_history = {}           # 分类历史 {rel_path: {species, dest_files}}
@@ -3173,7 +3208,7 @@ class WildCamSorter:
         def fit_settings_window():
             ratio = max(1, self.settings.get('font_scale', 100) / 100)
             width = min(window.winfo_screenwidth() - 60, int(620 * ratio))
-            height = min(window.winfo_screenheight() - 90, int(510 * ratio))
+            height = min(window.winfo_screenheight() - 90, int(570 * ratio))
             window.geometry(f'{width}x{height}')
         fit_settings_window()
         window.minsize(510, 450)
@@ -3212,6 +3247,14 @@ class WildCamSorter:
             except OSError as exc:
                 self._log(f'无法保存字号设置: {exc}', 'warning')
         font_combo.bind('<<ComboboxSelected>>', change_font)
+
+        layout_var = tk.BooleanVar(value=self.settings.get('equal_preview_layout', False))
+        tk.Checkbutton(
+            window, text='媒体窗格等大排列（关闭时优先放大视频）',
+            variable=layout_var, command=lambda: self._change_preview_layout(layout_var.get()),
+            bg=COLOR_BG, fg=COLOR_TEXT, selectcolor=COLOR_PANEL_BG,
+            activebackground=COLOR_BG, activeforeground=COLOR_TEXT
+        ).pack(anchor='w', padx=30, pady=3)
 
         box = tk.LabelFrame(window, text=' 性能设置（下次启动生效） ',
                             bg=COLOR_BG, fg=COLOR_TEXT, padx=12, pady=8)
@@ -3427,6 +3470,25 @@ class WildCamSorter:
         self._render_group_page()
         self._update_all_panel_selections()
 
+    def _change_preview_layout(self, equal):
+        """Switch layouts immediately without losing selection or category state."""
+        self.settings['equal_preview_layout'] = bool(equal)
+        try:
+            save_app_settings(self.settings)
+        except OSError as exc:
+            self._log(f'保存媒体布局失败: {exc}', 'warning')
+        if self.current_group_index >= 0 and self.current_group_files:
+            self._stop_video()
+            self._preview_generation += 1
+            for work_queue in (self._image_preview_queue, self._video_preview_queue):
+                try:
+                    while True:
+                        work_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self._render_group_page()
+            self._update_all_panel_selections()
+
     def _render_group_page(self):
         """仅解码当前页的文件；选择状态仍以整组的文件序号保存。"""
         for panel in self._panels + self.overflow_panels:
@@ -3440,7 +3502,9 @@ class WildCamSorter:
         video_local = next((i for i, index in enumerate(indices)
                             if is_video_file(os.path.basename(self.current_group_files[index]))),
                            None)
-        layout = media_panel_layout(len(indices), video_local)
+        layout = media_panel_layout(
+            len(indices), video_local,
+            equal=self.settings.get('equal_preview_layout', False))
         total_rows = max(row + row_span for _, row, _, row_span, _ in layout)
         for row in range(3):
             self.display_frame.grid_rowconfigure(row, weight=int(row < total_rows),
@@ -3489,7 +3553,6 @@ class WildCamSorter:
             file_path = self.current_group_files[index]
             panel.label_text = self._media_label_for_index(index)
             panel.display_loading(file_path, panel.label_text)
-            self._queue_preview(panel, file_path, generation)
             panel.set_selected(self.selected_flags[index])
             if not video_started and is_video_file(os.path.basename(file_path)):
                 video_started = True
@@ -3501,9 +3564,21 @@ class WildCamSorter:
             self._video_start_after_id = self.root.after(
                 VIDEO_AUTOPLAY_FALLBACK_MS,
                 lambda g=generation: self._maybe_start_pending_video(g, force=True))
+        # Tk only knows the new grid cell dimensions after its idle layout pass.
+        # Decoding before then reuses the previous, often much smaller, cell.
+        self.root.after_idle(lambda g=generation: self._queue_page_previews(g))
         if hasattr(self, 'settings'):
             self._apply_theme(self.settings.get('theme', 'system'),
                               persist=False, window=self.display_frame)
+
+    def _queue_page_previews(self, generation):
+        if generation != self._preview_generation or self._closing:
+            return
+        for panel in self._panels + self.overflow_panels:
+            if panel.file_path and panel.index < len(self.current_group_files):
+                self._queue_preview(panel, panel.file_path, generation)
+        if self._performance_settings.get('prefetch_next', True):
+            self._queue_next_group_previews(self.current_group_index, generation)
 
     # ==================== UI：操作区 ====================
     
@@ -3559,12 +3634,12 @@ class WildCamSorter:
 
         # Species names and their count are user-defined: scroll this part
         # horizontally instead of allowing it to push navigation off-screen.
-        species_container = tk.Frame(left_frame, bg='#1A1A1A')
-        species_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
-        self.species_canvas = tk.Canvas(species_container, bg='#1A1A1A',
+        self.species_container = tk.Frame(left_frame, bg='#1A1A1A')
+        self.species_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
+        self.species_canvas = tk.Canvas(self.species_container, bg='#1A1A1A',
                                         height=43, highlightthickness=0)
         self.species_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
-        self.species_scroll = tk.Scrollbar(species_container, orient=tk.HORIZONTAL,
+        self.species_scroll = tk.Scrollbar(self.species_container, orient=tk.HORIZONTAL,
                                       command=self.species_canvas.xview)
         self.species_canvas.configure(xscrollcommand=self.species_scroll.set)
         self.species_frame = tk.Frame(self.species_canvas, bg='#1A1A1A')
@@ -4222,7 +4297,6 @@ class WildCamSorter:
         # 停止旧视频
         self._stop_video()
         self._preview_generation += 1
-        preview_generation = self._preview_generation
         if self._video_start_after_id is not None:
             try:
                 self.root.after_cancel(self._video_start_after_id)
@@ -4284,10 +4358,6 @@ class WildCamSorter:
         self._panel_page = 0
         self._render_group_page()
 
-        # 图片线程空闲时预读下一组。缓存只保留少量缩略图，不随500G目录增长。
-        if self._performance_settings.get('prefetch_next', True):
-            self._queue_next_group_previews(group_index, preview_generation)
-        
         # 更新所有面板的选中状态
         self._update_all_panel_selections()
         
@@ -4325,17 +4395,20 @@ class WildCamSorter:
         return self._preview_task_sequence
 
     def _preview_cache_get(self, cache_key):
+        """Return (thumbnail, sufficiently_large) for the requested panel."""
         with self._preview_cache_lock:
             value = self._preview_cache.pop(cache_key, None)
             if value is not None:
                 self._preview_cache[cache_key] = value
-                return value.copy()
-            # A prefetched first frame may use the previous group's panel
-            # dimensions. Reuse it for immediate display, keeping its aspect.
+                return value.copy(), True
+            fallback = None
             for key in reversed(self._preview_cache):
                 if key[0] == cache_key[0]:
-                    return self._preview_cache[key].copy()
-        return None
+                    if key[1] >= cache_key[1] * .95 and key[2] >= cache_key[2] * .95:
+                        return self._preview_cache[key].copy(), True
+                    if fallback is None:
+                        fallback = self._preview_cache[key].copy()
+            return fallback, False
 
     def _preview_cache_put(self, cache_key, image):
         with self._preview_cache_lock:
@@ -4356,19 +4429,22 @@ class WildCamSorter:
     def _queue_preview(self, panel: MediaPanel, file_path: str, generation: int):
         """提交当前组缩略图；图片与视频使用互不阻塞的工作队列。"""
         width, height = panel._calc_display_size()
-        width, height = max(width, 320), max(height, 200)
+        # A 9-file grid can have cells narrower than 320 px on a small display.
+        # Forcing every image to 320 px makes Tk enlarge the grid past the window.
+        width, height = max(width, 96), max(height, 72)
         media_kind = 'video' if is_video_file(os.path.basename(file_path)) else 'image'
         pending_key = (generation, panel.index, file_path)
         self._preview_pending.add(pending_key)
 
         cache_key = (file_path, width, height)
-        cached = self._preview_cache_get(cache_key)
+        panel._preview_target_size = (width, height)
+        cached, sufficiently_large = self._preview_cache_get(cache_key)
         if cached is not None:
             self._preview_result_queue.put(
                 (generation, panel.index, file_path, cached, None, media_kind,
-                 media_file_time(file_path))
+                 media_file_time(file_path), (width, height), not sufficiently_large)
             )
-        else:
+        if not sufficiently_large:
             job = (0, self._next_preview_sequence(), generation, panel.index,
                    file_path, width, height, False)
             try:
@@ -4377,7 +4453,8 @@ class WildCamSorter:
             except queue.Full:
                 self._preview_result_queue.put(
                     (generation, panel.index, file_path, None,
-                     '视频预览队列已满', media_kind, '创建时间不可用')
+                     '视频预览队列已满', media_kind, '创建时间不可用',
+                     (width, height), False)
                 )
         if self._preview_poll_after_id is None:
             self._preview_poll_after_id = self.root.after(20, self._poll_preview_results)
@@ -4387,9 +4464,21 @@ class WildCamSorter:
         next_index = group_index + 1
         if next_index >= len(self.groups):
             return
-        default_width, default_height = self._panels[0]._calc_display_size()
-        width, height = max(default_width, 320), max(default_height, 200)
-        for file_path in self.groups[next_index][:9]:
+        next_files = self.groups[next_index][:9]
+        if not next_files:
+            return
+        video_local = next((i for i, path in enumerate(next_files)
+                            if is_video_file(os.path.basename(path))), None)
+        layout = media_panel_layout(
+            len(next_files), video_local,
+            equal=self.settings.get('equal_preview_layout', False))
+        rows = max(row + span for _, row, _, span, _ in layout)
+        frame_w = max(320, self.display_frame.winfo_width())
+        frame_h = max(240, self.display_frame.winfo_height())
+        for local, _row, _col, row_span, col_span in layout:
+            file_path = next_files[local]
+            width = max(96, int(frame_w * col_span / 12) - 8)
+            height = max(72, int(frame_h * row_span / rows) - 35)
             media_kind = 'video' if is_video_file(os.path.basename(file_path)) else 'image'
             cache_key = (file_path, width, height)
             with self._preview_cache_lock:
@@ -4456,7 +4545,7 @@ class WildCamSorter:
                 continue
             self._preview_result_queue.put(
                 (generation, panel_index, file_path, image, error, media_kind,
-                 file_time)
+                 file_time, (width, height), False)
             )
 
     def _panel_for_index(self, panel_index: int):
@@ -4468,16 +4557,17 @@ class WildCamSorter:
         self._preview_poll_after_id = None
         try:
             while True:
-                generation, panel_index, file_path, image, error, media_kind, file_time = (
-                    self._preview_result_queue.get_nowait()
-                )
+                (generation, panel_index, file_path, image, error, media_kind,
+                 file_time, request_size, preliminary) = self._preview_result_queue.get_nowait()
                 if generation != self._preview_generation:
                     continue
-                pending_key = (generation, panel_index, file_path)
-                self._preview_pending.discard(pending_key)
                 panel = self._panel_for_index(panel_index)
                 if panel is None or panel.file_path != file_path:
                     continue
+                if getattr(panel, '_preview_target_size', None) != request_size:
+                    continue
+                if not preliminary:
+                    self._preview_pending.discard((generation, panel_index, file_path))
                 panel.time_label.config(text=file_time)
                 if image is None:
                     kind = '视频' if is_video_file(os.path.basename(file_path)) else '图片'
@@ -4487,7 +4577,7 @@ class WildCamSorter:
                     panel._photo = photo
                     panel.media_label.config(image=photo, text='')
 
-                if panel_index not in self._preview_completed_panels:
+                if not preliminary and panel_index not in self._preview_completed_panels:
                     self._preview_completed_panels.add(panel_index)
                     if media_kind == 'image':
                         self._preview_pending_images = max(
@@ -5462,6 +5552,8 @@ class WildCamSorter:
     
     def _rebuild_species_buttons(self):
         """重建物种按钮（当物种列表变化时）"""
+        if self._editing_categories:
+            self._exit_category_edit()
         # 清除旧按钮
         for widget in self.species_frame.winfo_children():
             widget.destroy()
@@ -5481,7 +5573,8 @@ class WildCamSorter:
             return
         
         for name in self.species_list:
-            tile = tk.Frame(self.species_frame, bg='#1A1A1A')
+            tile = tk.Frame(self.species_frame, bg='#1A1A1A',
+                            highlightthickness=2, highlightbackground='#1A1A1A')
             tile.pack(side=tk.LEFT, padx=3)
             btn = create_button(
                 tile,
@@ -5494,7 +5587,7 @@ class WildCamSorter:
                 command=lambda n=name: self._on_species_click(n)
             )
             btn.pack(side=tk.LEFT)
-            btn.bind('<ButtonPress-1>', lambda _event, n=name: self._begin_category_press(n))
+            btn.bind('<ButtonPress-1>', lambda event, n=name: self._begin_category_press(n, event))
             btn.bind('<ButtonRelease-1>', lambda _event: self._end_category_press())
             btn.bind('<B1-Motion>', lambda event, n=name: self._drag_category(n, event))
             btn.bind('<Button-3>', lambda _event: self._enter_category_edit())
@@ -5502,8 +5595,6 @@ class WildCamSorter:
                 tile, text='×', font=('微软雅黑', 9, 'bold'), bg='#B71C1C',
                 fg='white', padx=3, pady=0,
                 command=lambda n=name: self._prompt_delete_category(n))
-            if self._editing_categories:
-                remove.place(relx=1, x=2, y=-2, anchor=tk.NE)
             self._species_tiles[name] = (tile, remove)
             self.species_buttons[name] = btn
         
@@ -5519,67 +5610,160 @@ class WildCamSorter:
                               persist=False, window=self.species_frame)
         self.root.after_idle(self._update_species_scrollbar)
 
-    def _begin_category_press(self, name):
+    def _begin_category_press(self, name, event=None):
         self._end_category_press()
         if self._editing_categories:
-            self._category_drag_name = name
+            self._start_category_drag(name, event.x_root if event else None)
         elif self.target_dir and not self._migration_pending:
             self._press_after_id = self.root.after(
-                600, lambda: self._enter_category_edit(name))
+                600, lambda: self._enter_category_edit(name,
+                                                       self.species_frame.winfo_pointerx()))
 
     def _end_category_press(self):
         if self._press_after_id is not None:
             self.root.after_cancel(self._press_after_id)
             self._press_after_id = None
         if self._category_drag_name is not None:
+            self._species_tiles[self._category_drag_name][0].configure(
+                highlightbackground=self._theme_color('#1A1A1A'))
             self._category_drag_name = None
+            self._animate_category_tiles()
+        if self._category_order_changed and self.target_dir:
+            self._category_order_changed = False
+            try:
+                save_category_order(self.target_dir, self.species_list)
+            except OSError as exc:
+                self._log(f'保存分类按钮顺序失败: {exc}', 'warning')
 
-    def _enter_category_edit(self, name=None):
+    def _enter_category_edit(self, name=None, pointer_x=None):
         self._press_after_id = None
         if not self.target_dir or self._migration_pending:
             return
+        if self._editing_categories:
+            return
+        # Normal button rows use pack. Place is used only in edit mode so
+        # neighboring buttons can slide to their new slots frame by frame.
+        self.root.update_idletasks()
         self._editing_categories = True
-        self._category_drag_name = name
-        self.btn_edit_done.pack(side=tk.LEFT, padx=4)
-        for _tile, remove in self._species_tiles.values():
+        self._category_widths = {
+            category: max(32, tile.winfo_width(), tile.winfo_reqwidth())
+            for category, (tile, _remove) in self._species_tiles.items()}
+        self._category_slot_x = category_slot_positions(
+            self.species_list, self._category_widths)
+        self._category_visual_x = dict(self._category_slot_x)
+        height = max((tile.winfo_height() for tile, _ in self._species_tiles.values()),
+                     default=36) + 6
+        full_width = sum(self._category_widths.values()) + 6 * len(self.species_list)
+        self.species_frame.configure(width=max(1, full_width), height=height)
+        self.species_canvas.configure(height=max(43, height))
+        for category, (tile, remove) in self._species_tiles.items():
+            tile.pack_forget()
+            tile.place(x=self._category_slot_x[category], y=3,
+                       width=self._category_widths[category], height=height - 6)
             remove.place(relx=1, x=2, y=-2, anchor=tk.NE)
+        self.btn_edit_done.pack(side=tk.LEFT, before=self.species_container, padx=4)
+        self.root.update_idletasks()
+        if name is not None:
+            self._start_category_drag(name, pointer_x)
+        self._wiggle_category_tiles()
         self.label_status.config(text='编辑分类：拖动按钮调整顺序，点击 × 删除并迁移分类',
                                  fg=self._theme_color('#FFB74D'))
+        self.root.after_idle(self._update_species_scrollbar)
+
+    def _start_category_drag(self, name, pointer_x=None):
+        if name not in self._species_tiles:
+            return
+        tile = self._species_tiles[name][0]
+        self._category_drag_name = name
+        if pointer_x is None:
+            pointer_x = self.species_frame.winfo_pointerx()
+        self._category_drag_offset = max(0, min(
+            self._category_widths[name], pointer_x - tile.winfo_rootx()))
+        tile.configure(highlightbackground='#1E88E5')
+        tile.lift()
 
     def _exit_category_edit(self):
         if not self._editing_categories:
             return None
         self._end_category_press()
+        for attr in ('_category_animation_after_id', '_category_wiggle_after_id'):
+            after_id = getattr(self, attr, None)
+            if after_id is not None:
+                self.root.after_cancel(after_id)
+                setattr(self, attr, None)
         self._editing_categories = False
         self.btn_edit_done.pack_forget()
-        for _tile, remove in self._species_tiles.values():
+        for tile, remove in self._species_tiles.values():
             remove.place_forget()
+            tile.place_forget()
+        for category in self.species_list:
+            self._species_tiles[category][0].pack(side=tk.LEFT, padx=3)
+        self.species_frame.configure(width=0, height=0)
+        self.species_canvas.configure(height=43)
+        self.root.after_idle(self._update_species_scrollbar)
         return 'break'
 
     def _drag_category(self, name, event):
         if not self._editing_categories or self._category_drag_name != name:
             return
+        canvas_x = event.x_root - self.species_canvas.winfo_rootx()
+        if canvas_x < 22:
+            self.species_canvas.xview_scroll(-1, 'units')
+        elif canvas_x > self.species_canvas.winfo_width() - 22:
+            self.species_canvas.xview_scroll(1, 'units')
+        left = event.x_root - self.species_frame.winfo_rootx() - self._category_drag_offset
+        left = max(0, min(left, self.species_frame.winfo_width() - self._category_widths[name]))
+        self._category_visual_x[name] = left
+        tile = self._species_tiles[name][0]
+        tile.place_configure(x=round(left), y=1)
+        tile.lift()
         current = self.species_list.index(name)
-        midpoint = event.x_root
-        target = current
-        for index, candidate in enumerate(self.species_list):
-            tile = self._species_tiles[candidate][0]
-            if midpoint < tile.winfo_rootx() + tile.winfo_width() // 2:
-                target = index
-                break
-        else:
-            target = len(self.species_list) - 1
+        midpoint = left + self._category_widths[name] / 2
+        target = sum(midpoint > self._category_slot_x[candidate]
+                     + self._category_widths[candidate] / 2
+                     for candidate in self.species_list if candidate != name)
         if target != current:
             self.species_list.insert(target, self.species_list.pop(current))
-            for category in self.species_list:
-                tile = self._species_tiles[category][0]
-                tile.pack_forget()
-                tile.pack(side=tk.LEFT, padx=3)
-            try:
-                save_category_order(self.target_dir, self.species_list)
-            except OSError as exc:
-                self._log(f'保存分类按钮顺序失败: {exc}', 'warning')
-            self.root.after_idle(self._update_species_scrollbar)
+            self._category_slot_x = category_slot_positions(
+                self.species_list, self._category_widths)
+            self._category_order_changed = True
+            self._animate_category_tiles()
+
+    def _animate_category_tiles(self):
+        if not self._editing_categories or self._category_animation_after_id is not None:
+            return
+        moving = False
+        for category, (tile, _remove) in self._species_tiles.items():
+            if category == self._category_drag_name:
+                continue
+            current = self._category_visual_x[category]
+            target = self._category_slot_x[category]
+            delta = target - current
+            if abs(delta) < .7:
+                current = target
+            else:
+                current += delta * .32
+                moving = True
+            self._category_visual_x[category] = current
+            tile.place_configure(x=round(current))
+        if moving:
+            self._category_animation_after_id = self.root.after(
+                16, self._continue_category_animation)
+
+    def _continue_category_animation(self):
+        self._category_animation_after_id = None
+        self._animate_category_tiles()
+
+    def _wiggle_category_tiles(self):
+        self._category_wiggle_after_id = None
+        if not self._editing_categories:
+            return
+        self._category_wiggle_phase += 1
+        for index, category in enumerate(self.species_list):
+            if category != self._category_drag_name:
+                self._species_tiles[category][0].place_configure(
+                    y=2 + (1 if (self._category_wiggle_phase + index) % 2 else -1))
+        self._category_wiggle_after_id = self.root.after(150, self._wiggle_category_tiles)
 
     def _prompt_delete_category(self, name):
         if self._migration_pending or self._pending_group_indices:
