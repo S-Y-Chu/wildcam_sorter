@@ -194,9 +194,9 @@ jobs:
           cat > release-notes.md <<'EOF'
           ## WildCam Sorter v1.12
 
-          本版本增加分类按钮长按排序与拖拽动画、删除类别并迁移数据、自适应媒体窗格及等大模式、界面字号；修复预读小缩略图在大窗格内始终不变大的问题。Mac 媒体选项卡加入关闭 ×，主页面视频目标 5 倍速自动播放并限制无效解码。详情见压缩包中的中英双语 README。
+          本版本增加分类按钮长按排序与拖拽动画、删除类别并迁移数据、自适应媒体窗格及等大模式、界面字号；修复预读小缩略图在大窗格内始终不变大、分组布局变化后图片没有填满可用范围的问题。5 个媒体时横向视频获得真正宽大的左侧窗格；Mac 媒体选项卡加入关闭 ×。详情见压缩包中的中英双语 README。
 
-          This update adds animated category dragging, safe deletion and migration, flexible or equal-size preview panes, font scaling, a close control on the Mac media tab, and 5x autoplay with capped rendering. Prefetched small thumbnails now upgrade to correctly sized previews in the background.
+          This update adds animated category dragging, safe deletion and migration, flexible or equal-size preview panes, font scaling, a close control on the Mac media tab, and 5x autoplay with capped rendering. Media now scales to use the available preview area, and a wider large cell makes video prominent in five-media groups.
 
           ### 下载选择
 

@@ -393,6 +393,48 @@ class PreviewPipelineTests(unittest.TestCase):
         self.assertLessEqual(preview.width, 600)
         self.assertLessEqual(preview.height, 400)
 
+    def test_small_camera_media_fills_cell_without_cropping(self):
+        thumbnail = wildcam_sorter.Image.new('RGB', (134, 100), 'green')
+        for video in (False, True):
+            preview = wildcam_sorter.fit_preview_to_panel(
+                thumbnail, (1020, 450), video=video)
+            self.assertEqual(preview.size, (603, 450))
+            self.assertEqual(preview.getpixel((0, 0)), (0, 128, 0))
+        self.assertEqual(wildcam_sorter.fit_preview_to_panel(
+            thumbnail, (67, 50)).size, (67, 50))
+
+    def test_preview_result_enlarges_small_source_before_tk_display(self):
+        app = self._make_app()
+        path = '/camera/004.jpg'
+        panel = MagicMock(index=0, file_path=path)
+        panel._preview_target_size = (1020, 450)
+        app._panel_for_index = MagicMock(return_value=panel)
+        app._preview_result_queue.put((
+            1, 0, path, wildcam_sorter.Image.new('RGB', (134, 100)),
+            None, 'image', '创建：今天', (1020, 450), False))
+        with patch.object(wildcam_sorter.ImageTk, 'PhotoImage',
+                          return_value=MagicMock()) as photo:
+            app._poll_preview_results()
+        self.assertEqual(photo.call_args.args[0].size, (603, 450))
+
+    def test_panel_resizes_after_grid_change_without_resizing_root(self):
+        app = self._make_app()
+        app._panel_resize_after_ids = {}
+        path = '/camera/004.jpg'
+        app.current_group_files = [path]
+        panel = MagicMock(index=0, file_path=path)
+        panel._preview_target_size = (160, 95)
+        panel._calc_display_size.return_value = (1020, 450)
+        app._panel_for_index = MagicMock(return_value=panel)
+
+        app._refresh_panel_at_actual_size(panel)
+
+        job = app._image_preview_queue.get_nowait()
+        self.assertEqual(job[5:7], (1020, 450))
+        self.assertEqual(panel._preview_target_size, (1020, 450))
+        app._refresh_panel_at_actual_size(panel)
+        self.assertTrue(app._image_preview_queue.empty())
+
     def test_prefetched_small_thumbnail_is_shown_then_replaced_at_full_size(self):
         app = self._make_app()
         path = '/camera/004.jpg'
@@ -824,7 +866,8 @@ class Version112Tests(unittest.TestCase):
         three = wildcam_sorter.media_panel_layout(3, 2)
         self.assertEqual(three[0], (2, 0, 0, 2, 6))
         five = wildcam_sorter.media_panel_layout(5, 4)
-        self.assertEqual(five[0], (4, 0, 0, 2, 4))
+        self.assertEqual(five[0], (4, 0, 0, 2, 6))
+        self.assertEqual([cell[4] for cell in five[1:]], [3] * 4)
         self.assertEqual({cell[0] for cell in five}, set(range(5)))
         self.assertEqual(len(wildcam_sorter.media_panel_layout(9)), 9)
 

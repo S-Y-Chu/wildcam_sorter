@@ -238,8 +238,10 @@ def media_panel_layout(count: int, video_index=None, equal=False) -> list:
         slots = [(0, 0, 1, 4), (0, 4, 1, 4), (0, 8, 1, 4),
                  (1, 0, 1, 6), (1, 6, 1, 6)]
     elif count == 5:
-        slots = [(0, 0, 2, 4), (0, 4, 1, 4), (0, 8, 1, 4),
-                 (1, 4, 1, 4), (1, 8, 1, 4)]
+        # A landscape video needs real horizontal room: a narrow, tall big
+        # cell had twice the area but displayed almost the same size as photos.
+        slots = [(0, 0, 2, 6), (0, 6, 1, 3), (0, 9, 1, 3),
+                 (1, 6, 1, 3), (1, 9, 1, 3)]
     elif count <= 6:
         slots = [(i // 3, (i % 3) * 4, 1, 4) for i in range(count)]
     elif count <= 8:
@@ -252,6 +254,26 @@ def media_panel_layout(count: int, video_index=None, equal=False) -> list:
         order.insert(0, video_index)
     return [(order[i], row, col, row_span, col_span)
             for i, (row, col, row_span, col_span) in enumerate(slots)]
+
+
+def fit_preview_to_panel(image: Image.Image, size: tuple, *, video=False) -> Image.Image:
+    """Fill the available preview height/width without cropping even tiny media.
+
+    PIL.thumbnail never enlarges an image. Some trail cameras save JPEGs or
+    videos at thumbnail resolution; showing those at native pixel size leaves
+    almost the entire panel blank. The source is still decoded at a bounded
+    resolution in the worker; this final resize is limited to the panel.
+    """
+    width, height = size
+    if width <= 0 or height <= 0 or not image.width or not image.height:
+        return image
+    ratio = min(width / image.width, height / image.height)
+    dimensions = (max(1, round(image.width * ratio)),
+                  max(1, round(image.height * ratio)))
+    if dimensions == image.size:
+        return image
+    return image.resize(dimensions, Image.Resampling.BILINEAR if video
+                        else Image.Resampling.LANCZOS)
 
 
 def category_order_path(target_dir: str) -> str:
@@ -1504,10 +1526,16 @@ class MediaPanel:
             panel_h = self.frame.winfo_reqheight()
         if panel_w <= 20 or panel_h <= 40:
             return (0, 0)
-        # 仅扣除极小标题空间（~10px），其余全部让给图片：
-        # 图片高度≈面板高度，底部必然贴满，无黑边
         available_w = panel_w - 4
         available_h = panel_h - max(25, self.title_label.winfo_height() + 5)
+        # Once Tk has laid out the header and media label, its real dimensions
+        # are more reliable than an estimate from the title font height.
+        label_w = self.media_label.winfo_width()
+        label_h = self.media_label.winfo_height()
+        if label_w > 20:
+            available_w = min(available_w, label_w - 2)
+        if label_h > 30:
+            available_h = min(available_h, label_h - 2)
         # 如果迷你标签栏可见（place），再扣除其高度
         try:
             if self.mini_frame.place_info():
@@ -1527,8 +1555,7 @@ class MediaPanel:
         if new_w <= 0:
             return None
         # BILINEAR 高质量缩放（静态图片只加载一次，质量优先于速度）
-        pil_resized = pil_img.copy()
-        pil_resized.thumbnail((new_w, new_h), Image.Resampling.LANCZOS)
+        pil_resized = fit_preview_to_panel(pil_img, (new_w, new_h))
         return ImageTk.PhotoImage(pil_resized)
     
     # ==================== 迷你操作区（框内独立类别选择）====================
@@ -2971,6 +2998,7 @@ class WildCamSorter:
         # ===== UI 状态 =====
         self._panels = []                 # MediaPanel 列表（4个）
         self._resize_after_id = None      # 窗口调整大小时的防抖 ID
+        self._panel_resize_after_ids = {}
         self._panels_ready = False        # 面板是否已完成首次渲染
         self._preview_generation = 0
         # 图片与视频首帧分离：慢视频不再占用图片线程。图片用优先队列，
@@ -3434,6 +3462,8 @@ class WildCamSorter:
         self._panel_page = 0
         for idx in range(4):
             panel = MediaPanel(self.display_frame, idx, f'媒体 {idx + 1}')
+            panel.frame.bind('<Configure>',
+                             lambda _event, p=panel: self._on_panel_configure(p))
             panel.set_toggle_callback(self._toggle_file_selection)
             panel.set_fullscreen_callback(self._open_fullscreen)
             panel.set_refresh_callback(self._on_panel_refresh)
@@ -3519,6 +3549,8 @@ class WildCamSorter:
                 panel.index = index
             else:
                 panel = MediaPanel(self.display_frame, index, f'媒体 {index + 1}')
+                panel.frame.bind('<Configure>',
+                                 lambda _event, p=panel: self._on_panel_configure(p))
                 panel.set_toggle_callback(self._toggle_file_selection)
                 panel.set_fullscreen_callback(self._open_fullscreen)
                 panel.set_refresh_callback(self._on_panel_refresh)
@@ -3579,6 +3611,35 @@ class WildCamSorter:
                 self._queue_preview(panel, panel.file_path, generation)
         if self._performance_settings.get('prefetch_next', True):
             self._queue_next_group_previews(self.current_group_index, generation)
+
+    def _on_panel_configure(self, panel):
+        """Request a correctly sized preview after this actual grid cell settles.
+
+        A root-window Configure event is not fired when the grid alone changes
+        (for example when moving from a 2x2 group to one large plus four small).
+        """
+        if self._closing or not panel.file_path:
+            return
+        previous = self._panel_resize_after_ids.pop(panel, None)
+        if previous is not None:
+            self.root.after_cancel(previous)
+        self._panel_resize_after_ids[panel] = self.root.after(
+            120, lambda p=panel: self._refresh_panel_at_actual_size(p))
+
+    def _refresh_panel_at_actual_size(self, panel):
+        self._panel_resize_after_ids.pop(panel, None)
+        if (self._closing or self._panel_for_index(panel.index) is not panel
+                or panel.file_path != self.current_group_files[panel.index]):
+            return
+        actual = panel._calc_display_size()
+        requested = getattr(panel, '_preview_target_size', None)
+        if requested is not None and all(
+                abs(real - old) < 8 for real, old in zip(actual, requested)):
+            return
+        if is_video_file(os.path.basename(panel.file_path)) and self.video_panel is panel:
+            self._cached_video_dims = (0, 0)
+        else:
+            self._queue_preview(panel, panel.file_path, self._preview_generation)
 
     # ==================== UI：操作区 ====================
     
@@ -4573,7 +4634,11 @@ class WildCamSorter:
                     kind = '视频' if is_video_file(os.path.basename(file_path)) else '图片'
                     panel.media_label.config(image='', text=f"⚠ 无法预览{kind}")
                 else:
-                    photo = ImageTk.PhotoImage(image)
+                    # Even a native 134x100 camera JPEG must occupy its pane;
+                    # thumbnail() alone only reduces images and leaves it tiny.
+                    fitted = fit_preview_to_panel(
+                        image, request_size, video=(media_kind == 'video'))
+                    photo = ImageTk.PhotoImage(fitted)
                     panel._photo = photo
                     panel.media_label.config(image=photo, text='')
 
@@ -4821,7 +4886,8 @@ class WildCamSorter:
             if new_w > 0 and new_h > 0:
                 try:
                     pil_img = Image.fromarray(frame_rgb)
-                    pil_img.thumbnail((new_w, new_h), Image.Resampling.BILINEAR)
+                    pil_img = fit_preview_to_panel(
+                        pil_img, (new_w, new_h), video=True)
                     self.video_photo = ImageTk.PhotoImage(pil_img)
                     panel.media_label.config(image=self.video_photo, text='')
                 except Exception:
