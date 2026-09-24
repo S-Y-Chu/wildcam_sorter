@@ -366,18 +366,18 @@ class PreviewPipelineTests(unittest.TestCase):
         app.root.after.assert_called_once_with(20, app._poll_preview_results)
         self.assertEqual(app._preview_poll_after_id, 'after-id')
 
-    def test_video_autoplay_waits_for_images_and_first_frame(self):
+    def test_video_autoplay_starts_with_first_frame_even_if_photos_are_loading(self):
         app = self._make_app()
         panel = MagicMock()
         app._pending_video_start = (1, '/camera/001.mp4', panel)
         app._preview_pending_images = 1
-        app._autoplay_video_preview_ready = True
+        app._autoplay_video_preview_ready = False
         app._start_video_if_current = MagicMock()
 
         app._maybe_start_pending_video(1)
         app._start_video_if_current.assert_not_called()
 
-        app._preview_pending_images = 0
+        app._autoplay_video_preview_ready = True
         app._maybe_start_pending_video(1)
         app._start_video_if_current.assert_called_once_with(
             1, '/camera/001.mp4', panel

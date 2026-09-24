@@ -4511,9 +4511,9 @@ class WildCamSorter:
         pending = self._pending_video_start
         if pending is None or pending[0] != generation:
             return
-        if not force and (
-                self._preview_pending_images > 0
-                or not self._autoplay_video_preview_ready):
+        # Video and image workers are independent: do not delay playback until
+        # every photo has finished loading, especially on a slow external disk.
+        if not force and not self._autoplay_video_preview_ready:
             return
         self._pending_video_start = None
         if self._video_start_after_id is not None:
