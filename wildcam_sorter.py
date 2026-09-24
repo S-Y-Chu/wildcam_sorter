@@ -4934,6 +4934,8 @@ class WildCamSorter:
     
     def _on_new_species(self):
         """新物种按钮：弹出输入框"""
+        if self._editing_categories or self._migration_pending:
+            return
         if not self.current_group_files:
             return
         
@@ -4979,6 +4981,8 @@ class WildCamSorter:
         
         所有操作都是复制（shutil.copy2），原始文件保留不动。
         """
+        if getattr(self, '_editing_categories', False):
+            return
         if self._migration_pending:
             self.label_status.config(text='正在迁移类别，请等待保存完成',
                                      fg=self._theme_color('#FFB74D'))

@@ -17,6 +17,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-v1.12
+  cancel-in-progress: true
+
 jobs:
   windows:
     name: Windows x64 Portable
@@ -205,6 +209,12 @@ jobs:
 
           if gh release view v1.12 >/dev/null 2>&1; then
             gh release upload v1.12 release-assets/*.zip --clobber
+            gh release edit v1.12 --target "$GITHUB_SHA" \
+              --title "WildCam Sorter v1.12" --notes-file release-notes.md --latest
+            # A prior run may have created the tag while a newer source commit
+            # was still building. Keep the tag in sync with the released ZIPs.
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/v1.12" \
+              -f sha="$GITHUB_SHA" -F force=true
           else
             gh release create v1.12 release-assets/*.zip \
               --target "$GITHUB_SHA" \
@@ -212,4 +222,3 @@ jobs:
               --notes-file release-notes.md \
               --latest
           fi
-
