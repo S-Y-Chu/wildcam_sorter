@@ -31,7 +31,7 @@
     D       : 输入新物种名称并分类
     F~L     : 快速选择已有物种分类
     ←/→     : 上一组 / 下一组
-    空格    : 播放/暂停视频
+    空格    : 主页面分类为空拍；独立视频查看时播放/暂停
 
 文件操作：仅复制（shutil.copy2），原始数据保持不变。
 """
@@ -54,6 +54,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from PIL import Image, ImageTk, ImageOps
 import cv2
@@ -100,15 +101,17 @@ COLOR_BUTTON_NAV = '#424242'         # 灰色 - 导航按钮
 COLOR_PROGRESS = '#1565C0'           # 蓝色 - 进度条
 COLOR_TOOLBAR = '#111111'
 
-APP_VERSION = '1.11'
+APP_VERSION = '1.12'
 IMAGE_PREVIEW_WORKERS = 4
 VIDEO_PREVIEW_WORKERS = 2
 PREVIEW_CACHE_LIMIT = 16
 PERFORMANCE_PRESETS = {
-    '省内存': (2, 1, 64, False),
-    '均衡': (4, 2, 128, True),
-    '快速': (8, 3, 256, True),
+    '省内存': (2, 1, 256, False),
+    '均衡': (4, 2, 512, True),
+    '快速': (8, 3, 2048, True),
 }
+MAIN_VIDEO_RATE = 5.0
+MAIN_VIDEO_DISPLAY_FPS = 20.0
 VIDEO_AUTOPLAY_FALLBACK_MS = 2500
 THEME_DISPLAY_NAMES = {'system': '跟随系统主题', 'light': '白色主题', 'dark': '黑色主题'}
 THEME_DARK_TO_LIGHT = {
@@ -121,23 +124,12 @@ THEME_DARK_TO_LIGHT = {
 
 
 def viewer_window_bounds(parent, screen_w, screen_h):
-    """Return the viewer's size and position without mutating the main window."""
-    width, height = parent.winfo_width(), parent.winfo_height()
-    try:
-        maximized = (parent.state() == 'zoomed'
-                     or bool(parent.attributes('-fullscreen')))
-    except tk.TclError:
-        maximized = False
-    # The macOS native green fullscreen button is not always reported by Tk
-    # as -fullscreen; the mapped dimensions provide a second, portable signal.
-    large_parent = (width >= screen_w * .88 and height >= screen_h * .80)
-    if (maximized or large_parent) and width > 100 and height > 100:
-        return (width, height, parent.winfo_rootx(), parent.winfo_rooty())
-    window_w = min(1400, max(760, screen_w - 80))
-    window_h = min(950, max(520, screen_h - 120))
+    """Keep viewer decorations inside the available monitor, even when parent is maximized."""
+    window_w = min(1200, max(600, int(screen_w * .80)))
+    window_h = min(800, max(440, int(screen_h * .76)))
     return (window_w, window_h,
             max(0, (screen_w - window_w) // 2),
-            max(0, (screen_h - window_h) // 2 - 10))
+            max(0, (screen_h - window_h) // 2))
 
 
 def mac_parent_is_fullscreen(parent, screen_w, screen_h):
@@ -178,7 +170,7 @@ def settings_file_path() -> str:
 def load_app_settings() -> dict:
     defaults = {'theme': 'system', 'performance': '均衡',
                 'image_workers': 4, 'video_workers': 2,
-                'cache_mb': 128, 'prefetch_next': True}
+                'cache_mb': 512, 'prefetch_next': True, 'font_scale': 100}
     try:
         with open(settings_file_path(), 'r', encoding='utf-8') as handle:
             saved = json.load(handle)
@@ -188,7 +180,8 @@ def load_app_settings() -> dict:
             if saved.get('performance') in (*PERFORMANCE_PRESETS, '自定义'):
                 defaults['performance'] = saved['performance']
             for name, minimum, maximum in (('image_workers', 1, 12),
-                                           ('video_workers', 1, 4), ('cache_mb', 32, 512)):
+                                           ('video_workers', 1, 6), ('cache_mb', 64, 4096),
+                                           ('font_scale', 80, 150)):
                 value = saved.get(name)
                 if type(value) is int and minimum <= value <= maximum:
                     defaults[name] = value
@@ -221,6 +214,230 @@ def media_file_time(file_path: str) -> str:
         return f"{label}：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stamp))}"
     except (OSError, OverflowError, ValueError):
         return '创建时间不可用'
+
+
+def media_panel_layout(count: int, video_index=None) -> list:
+    """Return (local index, row, column, row span, column span) for up to 9 files."""
+    if not 1 <= count <= 9:
+        raise ValueError('一个页面显示 1–9 个文件')
+    if count == 1:
+        slots = [(0, 0, 1, 12)]
+    elif count == 2:
+        slots = [(0, 0, 1, 6), (0, 6, 1, 6)]
+    elif count == 3:
+        slots = [(0, 0, 2, 6), (0, 6, 1, 6), (1, 6, 1, 6)]
+    elif count == 4:
+        slots = [(0, 0, 1, 6), (0, 6, 1, 6),
+                 (1, 0, 1, 6), (1, 6, 1, 6)]
+    elif count == 5:
+        slots = [(0, 0, 2, 4), (0, 4, 1, 4), (0, 8, 1, 4),
+                 (1, 4, 1, 4), (1, 8, 1, 4)]
+    elif count <= 6:
+        slots = [(i // 3, (i % 3) * 4, 1, 4) for i in range(count)]
+    elif count <= 8:
+        slots = [(i // 4, (i % 4) * 3, 1, 3) for i in range(count)]
+    else:
+        slots = [(i // 3, (i % 3) * 4, 1, 4) for i in range(count)]
+    order = list(range(count))
+    if count in (3, 5) and video_index is not None and 0 <= video_index < count:
+        order.remove(video_index)
+        order.insert(0, video_index)
+    return [(order[i], row, col, row_span, col_span)
+            for i, (row, col, row_span, col_span) in enumerate(slots)]
+
+
+def category_order_path(target_dir: str) -> str:
+    return os.path.join(target_dir, '.wildcam_button_order.json')
+
+
+def ordered_categories(target_dir: str, category_names: list) -> list:
+    """Keep saved category order and append externally added folders."""
+    try:
+        with open(category_order_path(target_dir), encoding='utf-8') as handle:
+            stored = json.load(handle)
+        if not isinstance(stored, list):
+            stored = []
+    except (OSError, ValueError, TypeError):
+        stored = []
+    available = set(category_names)
+    ordered = [name for name in stored if isinstance(name, str) and name in available]
+    return list(dict.fromkeys(ordered + list(category_names)))
+
+
+def save_category_order(target_dir: str, names: list):
+    """Persist only the display order, independent of the classification CSV."""
+    path = category_order_path(target_dir)
+    temp = path + '.tmp'
+    with open(temp, 'w', encoding='utf-8') as handle:
+        json.dump(list(names), handle, ensure_ascii=False)
+    os.replace(temp, path)
+
+
+def replace_category_label(value: str, old: str, new: str, separator: str) -> str:
+    """Replace complete labels and deduplicate multi-category assignments."""
+    labels = [new if item.strip() == old else item.strip()
+              for item in str(value or '').split(separator) if item.strip()]
+    return separator.join(dict.fromkeys(labels))
+
+
+def category_alias_path(target_dir: str) -> str:
+    return os.path.join(target_dir, '.wildcam_category_aliases.json')
+
+
+def load_category_aliases(target_dir: str) -> dict:
+    try:
+        with open(category_alias_path(target_dir), encoding='utf-8') as handle:
+            aliases = json.load(handle)
+        return aliases if isinstance(aliases, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def reconcile_category_history(history: dict, target_dir: str) -> dict:
+    """Other camera folders' old progress files remain usable after a migration."""
+    aliases = load_category_aliases(target_dir)
+    if not aliases:
+        return history
+    normalized = {}
+    for key, record in history.items():
+        if not isinstance(record, dict):
+            normalized[key] = record
+            continue
+        updated = dict(record)
+        labels = updated.get('species', '')
+        for old, new in aliases.items():
+            labels = replace_category_label(labels, old, new, '、')
+        updated['species'] = labels
+        paths = []
+        for path in updated.get('dest_files', []):
+            path = os.path.abspath(path)
+            for old, new in aliases.items():
+                old_dir = os.path.join(os.path.abspath(target_dir), old)
+                if path.startswith(old_dir + os.sep):
+                    path = os.path.join(target_dir, new,
+                                        os.path.relpath(path, old_dir))
+            paths.append(path)
+        updated['dest_files'] = list(dict.fromkeys(paths))
+        normalized[key] = updated
+    return normalized
+
+
+def plan_category_migration(target_dir: str, old: str, new: str) -> list:
+    """Validate the complete move before writing anything; never overwrite a collision."""
+    if (not old or not new or old == new or old == '空拍'
+            or os.path.basename(old) != old or os.path.basename(new) != new
+            or old.startswith('.') or new.startswith('.')):
+        raise ValueError('类别名称不合法，或目标类别与原类别相同')
+    old_dir = os.path.join(target_dir, old)
+    new_dir = os.path.join(target_dir, new)
+    if not os.path.isdir(old_dir) or not os.path.isdir(new_dir):
+        raise ValueError('类别目录不存在，请重新打开输入与输出目录')
+    moves = []
+    for base, dirs, files in os.walk(old_dir, followlinks=False):
+        for name in dirs + files:
+            if os.path.islink(os.path.join(base, name)):
+                raise ValueError(f'旧类别含符号链接，无法安全迁移：{name}')
+        for name in files:
+            src = os.path.join(base, name)
+            dst = os.path.join(new_dir, os.path.relpath(src, old_dir))
+            if os.path.lexists(dst):
+                if not os.path.isfile(dst) or os.path.getsize(src) != os.path.getsize(dst):
+                    raise FileExistsError(f'目标类别中存在不同内容的同名文件：{name}')
+                # Identical bytes may be de-duplicated; size alone is not sufficient.
+                with open(src, 'rb') as a, open(dst, 'rb') as b:
+                    while True:
+                        x, y = a.read(1024 * 1024), b.read(1024 * 1024)
+                        if x != y:
+                            raise FileExistsError(f'目标类别中存在不同内容的同名文件：{name}')
+                        if not x:
+                            break
+                moves.append((src, dst, True))
+            else:
+                moves.append((src, dst, False))
+    return moves
+
+
+def migrate_category_storage(target_dir: str, old: str, new: str) -> int:
+    """Move output files and update CSV/aliases with rollback on ordinary failures."""
+    if new == '空拍':
+        os.makedirs(os.path.join(target_dir, new), exist_ok=True)
+    moves = plan_category_migration(target_dir, old, new)
+    csv_path = os.path.join(target_dir, 'wildcam_records.csv')
+    alias_path = category_alias_path(target_dir)
+    stamp = f'{threading.get_ident()}-{time.time_ns()}'
+    csv_temp = csv_path + '.migration-' + stamp
+    csv_backup = csv_path + '.backup-' + stamp
+    alias_temp = alias_path + '.migration-' + stamp
+    aliases = load_category_aliases(target_dir)
+    aliases = {source: new if target == old else target
+               for source, target in aliases.items()}
+    aliases[old] = new
+    completed = []
+    csv_replaced = False
+    old_alias = None
+    try:
+        if os.path.isfile(csv_path):
+            shutil.copy2(csv_path, csv_backup)
+            with open(csv_path, 'r', newline='', encoding='utf-8-sig') as source, \
+                 open(csv_temp, 'w', newline='', encoding='utf-8-sig') as target:
+                reader = csv.DictReader(source)
+                if not reader.fieldnames or '物种名' not in reader.fieldnames:
+                    raise ValueError('CSV 缺少物种名列，已取消迁移')
+                writer = csv.DictWriter(target, fieldnames=reader.fieldnames)
+                writer.writeheader()
+                for row in reader:
+                    row['物种名'] = replace_category_label(row['物种名'], old, new, '；')
+                    writer.writerow(row)
+        with open(alias_temp, 'w', encoding='utf-8') as handle:
+            json.dump(aliases, handle, ensure_ascii=False)
+        if os.path.isfile(alias_path):
+            with open(alias_path, 'rb') as handle:
+                old_alias = handle.read()
+        for src, dst, duplicate in moves:
+            if duplicate:
+                continue  # Remove the redundant old copy after CSV commits.
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            # Check again: a different process may have added a file since preview.
+            if os.path.lexists(dst):
+                raise FileExistsError(f'迁移过程中目标出现同名文件：{dst}')
+            os.replace(src, dst)
+            completed.append((src, dst))
+        if os.path.isfile(csv_temp):
+            os.replace(csv_temp, csv_path)
+            csv_replaced = True
+        os.replace(alias_temp, alias_path)
+        # Committed: duplicates already exist in the target and can now be removed.
+        for src, _, duplicate in moves:
+            if duplicate:
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass  # A duplicate may be cleaned up on the next scan.
+        for base, _dirs, _files in os.walk(os.path.join(target_dir, old), topdown=False):
+            if not os.listdir(base):
+                try:
+                    os.rmdir(base)
+                except OSError:
+                    pass
+        return len(moves)
+    except Exception:
+        if csv_replaced and os.path.isfile(csv_backup):
+            os.replace(csv_backup, csv_path)
+        if old_alias is None:
+            if os.path.exists(alias_path):
+                os.remove(alias_path)
+        else:
+            with open(alias_path + '.restore', 'wb') as handle:
+                handle.write(old_alias)
+            os.replace(alias_path + '.restore', alias_path)
+        for src, dst in reversed(completed):
+            if os.path.isfile(dst):
+                os.replace(dst, src)
+        raise
+    finally:
+        for path in (csv_temp, csv_backup, alias_temp):
+            if os.path.exists(path):
+                os.remove(path)
 
 
 def system_uses_dark_theme() -> bool:
@@ -1089,19 +1306,19 @@ class MediaPanel:
             highlightbackground=COLOR_SELECTED_BORDER  # 默认绿色（选中）
         )
         
-        # 面板标题（顶部，显示标题+文件名，节省一行空间给图片）
+        header = tk.Frame(self.frame, bg=COLOR_PANEL_BG)
+        header.pack(side=tk.TOP, fill=tk.X)
+        # 文件名和时间共用一行；切换按钮在右侧，不遮挡时间。
         self.title_label = tk.Label(
-            self.frame,
+            header,
             text=label_text,
             font=("微软雅黑", 9, "bold"),
             bg=COLOR_PANEL_BG,
             fg=COLOR_TEXT,
             anchor=tk.W
         )
-        self.title_label.pack(side=tk.TOP, fill=tk.X, pady=(1, 0))
-        self.time_label = tk.Label(self.frame, text='', font=('微软雅黑', 8),
+        self.time_label = tk.Label(header, text='', font=('微软雅黑', 9),
                                    bg=COLOR_PANEL_BG, fg=COLOR_TEXT_DIM, anchor=tk.W)
-        self.time_label.pack(side=tk.TOP, fill=tk.X)
         
         # 媒体显示标签（占据主要空间，图片顶部对齐向下延伸）
         self.media_label = tk.Label(
@@ -1127,7 +1344,7 @@ class MediaPanel:
         
         # 右上角切换按钮（明显的按钮样式，点击切换选中/取消选中）
         self.select_btn = create_button(
-            self.frame,
+            header,
             text="✓ 已选",
             font=("微软雅黑", 9, "bold"),
             bg=COLOR_SELECTED_BORDER, fg='white',
@@ -1137,7 +1354,9 @@ class MediaPanel:
             command=self._on_toggle_btn,
             padx=6, pady=1
         )
-        self.select_btn.place(relx=0.97, rely=0.02, anchor='ne')
+        self.select_btn.pack(side=tk.RIGHT, padx=3)
+        self.time_label.pack(side=tk.RIGHT, padx=5)
+        self.title_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=1)
         
         # 绑定事件：点击图片/标题 → 打开全分辨率窗口
         self.media_label.bind('<Button-1>', self._on_fullscreen)
@@ -1270,21 +1489,16 @@ class MediaPanel:
         # 仅扣除极小标题空间（~10px），其余全部让给图片：
         # 图片高度≈面板高度，底部必然贴满，无黑边
         available_w = panel_w - 4
-        available_h = panel_h - 28
+        available_h = panel_h - max(25, self.title_label.winfo_height() + 5)
         # 如果迷你标签栏可见（place），再扣除其高度
         try:
-            self.mini_frame.place_info()
-            available_h -= 55
+            if self.mini_frame.place_info():
+                available_h -= 55
         except (tk.TclError, AttributeError):
             pass
         if available_w <= 0 or available_h <= 0:
             return (0, 0)
-        # 始终高度优先（保持3:2比例），宽度超出部分由Label裁剪：
-        # 保证图片上下边界完全贴满，底部无黑边
-        # +5px 溢出保险，确保贴满
-        new_h = available_h + 5
-        new_w = int(new_h * MEDIA_ASPECT_RATIO)
-        return (max(new_w, 1), max(new_h, 1))
+        return max(1, available_w), max(1, available_h)
     
     def _resize_and_center(self, pil_img: Image.Image) -> ImageTk.PhotoImage:
         """
@@ -1295,7 +1509,8 @@ class MediaPanel:
         if new_w <= 0:
             return None
         # BILINEAR 高质量缩放（静态图片只加载一次，质量优先于速度）
-        pil_resized = pil_img.resize((new_w, new_h), Image.LANCZOS)
+        pil_resized = pil_img.copy()
+        pil_resized.thumbnail((new_w, new_h), Image.Resampling.LANCZOS)
         return ImageTk.PhotoImage(pil_resized)
     
     # ==================== 迷你操作区（框内独立类别选择）====================
@@ -1974,7 +2189,7 @@ class FullScreenViewer:
         self._video_fps = 25.0        # 视频原始帧率
         self._video_frame_count = 0   # 视频总帧数
         self._video_duration = 0.0    # 视频时长（秒）
-        self._playback_rate = 1.0     # 播放倍速
+        self._playback_rate = 0.5     # 单独查看视频默认0.5倍速
         self._next_frame_deadline = None  # 下一帧对应的单调时钟时间
         self._seeking = False         # 用户是否正在拖动进度条
         self._updating_progress = False
@@ -1988,27 +2203,37 @@ class FullScreenViewer:
         self._pan_y = 0.0
         self._last_wheel_time = None
         
-        # 创建顶层窗口
-        self.window = tk.Toplevel(parent)
-        self.window.title(f"🔍 {os.path.basename(file_path)}")
-        # 主窗口占满屏幕时查看器也使用主窗口的完整可见区域。
-        # 只修改新建的 Toplevel，绝不调整主窗口的 geometry/state。
-        screen_w = max(800, self.window.winfo_screenwidth())
-        screen_h = max(600, self.window.winfo_screenheight())
-        window_w, window_h, window_x, window_y = viewer_window_bounds(parent, screen_w, screen_h)
-        self.window.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
+        self._parent_window = parent
+        self._embedded = sys.platform == 'darwin'
+        self._viewer_space_binding = None
+        self._viewer_escape_binding = None
+        if self._embedded:
+            # Mac 全屏 Space 内直接切换应用内标签页，不再强制另建全屏窗口。
+            self.window = tk.Frame(parent, bg='#111111')
+            self.window.grid(row=0, column=0, rowspan=4, sticky='nsew')
+            self.window.lift()
+            tabs = tk.Frame(self.window, bg='#242424', height=34)
+            tabs.pack(fill=tk.X)
+            create_button(tabs, text='分类', command=self._close, padx=12).pack(side=tk.LEFT)
+            tk.Label(tabs, text=f'  {os.path.basename(file_path)}', bg='#111111',
+                     fg='white', padx=12).pack(side=tk.LEFT, fill=tk.Y)
+        else:
+            self.window = tk.Toplevel(parent)
+            self.window.title(f"🔍 {os.path.basename(file_path)}")
+            screen_w = max(800, self.window.winfo_screenwidth())
+            screen_h = max(600, self.window.winfo_screenheight())
+            window_w, window_h, window_x, window_y = viewer_window_bounds(parent, screen_w, screen_h)
+            self.window.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
+            self.window.minsize(600, 400)
         self.window.configure(bg='#111111')
-        self.window.minsize(600, 400)
-        if sys.platform == 'darwin' and mac_parent_is_fullscreen(parent, screen_w, screen_h):
-            try:
-                # Geometry alone leaves the title bar outside a fullscreen Space.
-                self.window.attributes('-fullscreen', True)
-            except tk.TclError:
-                pass  # The parent-sized geometry still provides a usable viewer.
         
         # ESC关闭
         self.window.bind('<Escape>', lambda e: self._close())
-        self.window.protocol("WM_DELETE_WINDOW", self._close)
+        if self._embedded:
+            self._viewer_escape_binding = parent.bind(
+                '<Escape>', lambda _event: (self._close(), 'break')[1], add='+')
+        if not self._embedded:
+            self.window.protocol("WM_DELETE_WINDOW", self._close)
         
         # ---- 顶部工具栏 ----
         toolbar = tk.Frame(self.window, bg='#1A1A1A', height=36)
@@ -2112,7 +2337,7 @@ class FullScreenViewer:
             tk.Label(speed_frame, text="播放速度", font=("微软雅黑", 9),
                      bg='#242424', fg='#CCCCCC').pack(side=tk.LEFT, padx=(0, 4))
 
-            self.speed_var = tk.StringVar(value="1.0×")
+            self.speed_var = tk.StringVar(value="0.5×")
             self.speed_combo = ttk.Combobox(
                 speed_frame,
                 textvariable=self.speed_var,
@@ -2140,7 +2365,9 @@ class FullScreenViewer:
         self.canvas.bind('<B1-Motion>', self._on_drag_move)
         self.canvas.bind('<Configure>', self._on_canvas_configure)
         if is_video:
-            self.window.bind('<space>', self._on_space_play_pause)
+            host = parent if self._embedded else self.window
+            self._viewer_space_binding = host.bind(
+                '<space>', self._on_space_play_pause, add='+')
         
         # ---- 加载媒体 ----
         if is_video:
@@ -2168,7 +2395,7 @@ class FullScreenViewer:
     def _load_video(self):
         """在解码线程打开视频；Tk 线程只显示解码后的最新帧。"""
         self._video_playing = True
-        self._playback_rate = 1.0
+        self._playback_rate = 0.5
         self._video_commands = queue.Queue()
         self._video_frames = queue.Queue(maxsize=3)
         self._video_stop_event = threading.Event()
@@ -2194,7 +2421,7 @@ class FullScreenViewer:
             frame_count = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
             duration = frame_count / fps if frame_count else 0.0
             results.put(('meta', fps, duration))
-            playing, rate = True, 1.0
+            playing, rate = True, 0.5
             origin_media, origin_clock = 0.0, time.monotonic()
             while not stop_event.is_set():
                 now = time.monotonic()
@@ -2577,6 +2804,17 @@ class FullScreenViewer:
     def _close(self):
         """关闭查看器，释放资源"""
         self._video_playing = False
+        if self._viewer_space_binding:
+            host = self._parent_window if self._embedded else self.window
+            try:
+                host.unbind('<space>', self._viewer_space_binding)
+            except tk.TclError:
+                pass
+        if self._viewer_escape_binding:
+            try:
+                self._parent_window.unbind('<Escape>', self._viewer_escape_binding)
+            except tk.TclError:
+                pass
         if self._video_after_id:
             try:
                 self.window.after_cancel(self._video_after_id)
@@ -2597,6 +2835,8 @@ class FullScreenViewer:
             except Exception:
                 pass
         self.window.destroy()
+        if self._embedded:
+            self._parent_window.focus_set()
 
 
 # ==================== 主应用类 ====================
@@ -2635,6 +2875,11 @@ class WildCamSorter:
         self.selected_flags = [True, True, True, True]  # 选中状态
         self.species_list = []            # 物种名称列表
         self.species_buttons = {}         # {物种名: Button}
+        self._species_tiles = {}
+        self._editing_categories = False
+        self._press_after_id = None
+        self._category_drag_name = None
+        self._migration_pending = False
         self.processed_groups = set()     # 已处理组标识集合
         self.class_history = {}           # 分类历史 {rel_path: {species, dest_files}}
         self.progress_file = None         # 进度文件路径
@@ -2660,6 +2905,8 @@ class WildCamSorter:
         self._progress_save_pending = None
         self._progress_save_thread = None
         self._jump_search_state = None
+        self._viewer_open = False
+        self._last_space_classify = 0.0
 
         # ===== 无损快速分类队列 =====
         # UI只负责冻结“用户当时看到的那一组”的快照并立即前进；复制、EXIF、CSV
@@ -2694,7 +2941,7 @@ class WildCamSorter:
         # 图片与视频首帧分离：慢视频不再占用图片线程。图片用优先队列，
         # 当前组优先于下一组的后台预读。
         self._image_preview_queue = queue.PriorityQueue()
-        self._video_preview_queue = queue.Queue(maxsize=32)
+        self._video_preview_queue = queue.PriorityQueue(maxsize=64)
         self._preview_result_queue = queue.Queue()
         self._preview_poll_after_id = None
         self._preview_task_sequence = 0
@@ -2872,6 +3119,7 @@ class WildCamSorter:
                 visit(child)
 
         visit(self.root if window is None else window)
+        self._apply_font_scale(self.root if window is None else window)
         self._active_theme = resolved
         self.settings['theme'] = mode
         if persist:
@@ -2879,6 +3127,36 @@ class WildCamSorter:
                 save_app_settings(self.settings)
             except OSError as exc:
                 self._log(f"无法保存设置: {exc}", 'warning')
+
+    def _apply_font_scale(self, window=None):
+        """统一所有新旧控件的字号，始终从初始字号计算避免反复放大。"""
+        factor = self.settings.get('font_scale', 100) / 100
+        def visit(widget):
+            try:
+                if getattr(widget, '_wildcam_font_scale', None) == factor:
+                    raise AttributeError('font already at requested scale')
+                original = getattr(widget, '_wildcam_base_font', None)
+                if original is None:
+                    current = widget.cget('font')
+                    resolved = tkfont.Font(font=current).actual()
+                    original = (resolved['family'], resolved['size'], resolved['weight'],
+                                resolved['slant'], resolved['underline'], resolved['overstrike'])
+                    widget._wildcam_base_font = original
+                family, size, weight, slant, underline, overstrike = original
+                scaled = max(8, round(abs(size) * factor)) * (1 if size >= 0 else -1)
+                scaled_font = tkfont.Font(
+                    family=family, size=scaled, weight=weight, slant=slant,
+                    underline=underline, overstrike=overstrike)
+                widget.configure(font=scaled_font)
+                widget._wildcam_font = scaled_font
+                widget._wildcam_font_scale = factor
+            except (tk.TclError, AttributeError, TypeError, KeyError):
+                pass
+            for child in widget.winfo_children():
+                visit(child)
+        visit(self.root if window is None else window)
+        if hasattr(self, 'control_frame'):
+            self.control_frame.configure(height=max(130, round(130 * factor)))
 
     def _poll_system_theme(self):
         if self._closing:
@@ -2892,7 +3170,12 @@ class WildCamSorter:
     def _show_settings(self):
         window = tk.Toplevel(self.root)
         window.title('系统设置')
-        window.geometry('620x510')
+        def fit_settings_window():
+            ratio = max(1, self.settings.get('font_scale', 100) / 100)
+            width = min(window.winfo_screenwidth() - 60, int(620 * ratio))
+            height = min(window.winfo_screenheight() - 90, int(510 * ratio))
+            window.geometry(f'{width}x{height}')
+        fit_settings_window()
         window.minsize(510, 450)
         window.transient(self.root)
         window.configure(bg=COLOR_BG)
@@ -2911,6 +3194,24 @@ class WildCamSorter:
         combo.pack(side=tk.LEFT)
         combo.bind('<<ComboboxSelected>>', lambda _event: self._apply_theme(
             display_to_key[theme_var.get()]))
+
+        font_row = tk.Frame(window, bg=COLOR_BG)
+        font_row.pack(fill=tk.X, padx=30, pady=5)
+        tk.Label(font_row, text='界面字号', width=12, anchor='w',
+                 bg=COLOR_BG, fg=COLOR_TEXT).pack(side=tk.LEFT)
+        font_var = tk.StringVar(value=f"{self.settings.get('font_scale', 100)}%")
+        font_combo = ttk.Combobox(font_row, textvariable=font_var, state='readonly',
+                                  values=[f'{n}%' for n in range(80, 151, 10)], width=10)
+        font_combo.pack(side=tk.LEFT)
+        def change_font(_event):
+            self.settings['font_scale'] = int(font_var.get().rstrip('%'))
+            self._apply_font_scale()
+            fit_settings_window()
+            try:
+                save_app_settings(self.settings)
+            except OSError as exc:
+                self._log(f'无法保存字号设置: {exc}', 'warning')
+        font_combo.bind('<<ComboboxSelected>>', change_font)
 
         box = tk.LabelFrame(window, text=' 性能设置（下次启动生效） ',
                             bg=COLOR_BG, fg=COLOR_TEXT, padx=12, pady=8)
@@ -2933,14 +3234,14 @@ class WildCamSorter:
                 cache.set(str(values[2])); prefetch.set(values[3])
         selector.bind('<<ComboboxSelected>>', apply_preset)
         for title, variable, unit in (('图片预览线程', images, '（1–12）'),
-                                      ('视频预览线程', videos, '（1–4）'),
-                                      ('缩略图缓存', cache, 'MB（32–512）')):
+                                      ('视频预览线程', videos, '（1–6）'),
+                                      ('缩略图缓存', cache, 'MB（64–4096）')):
             row = tk.Frame(box, bg=COLOR_BG); row.pack(fill=tk.X, pady=3)
             tk.Label(row, text=title, width=15, anchor='w',
                      bg=COLOR_BG, fg=COLOR_TEXT).pack(side=tk.LEFT)
             tk.Entry(row, textvariable=variable, width=9).pack(side=tk.LEFT)
             tk.Label(row, text=unit, bg=COLOR_BG, fg=COLOR_TEXT_DIM).pack(side=tk.LEFT, padx=8)
-        tk.Checkbutton(box, text='预读下一组图片', variable=prefetch,
+        tk.Checkbutton(box, text='预读下一组媒体', variable=prefetch,
                        bg=COLOR_BG, fg=COLOR_TEXT, selectcolor=COLOR_PANEL_BG,
                        activebackground=COLOR_BG, activeforeground=COLOR_TEXT).pack(anchor='w')
         tk.Label(box, text='分类文件复制与 CSV 写入始终使用单线程，保证记录顺序。',
@@ -2949,8 +3250,8 @@ class WildCamSorter:
         def save_performance():
             try:
                 values = (int(images.get()), int(videos.get()), int(cache.get()))
-                if not (1 <= values[0] <= 12 and 1 <= values[1] <= 4
-                        and 32 <= values[2] <= 512):
+                if not (1 <= values[0] <= 12 and 1 <= values[1] <= 6
+                        and 64 <= values[2] <= 4096):
                     raise ValueError('超出设置范围')
                 self.settings.update(performance=preset.get(), image_workers=values[0],
                                      video_workers=values[1], cache_mb=values[2],
@@ -2976,6 +3277,7 @@ class WildCamSorter:
             parent=window), bg='#455A64', fg='white', relief=tk.FLAT,
             padx=12).pack(side=tk.LEFT, padx=5)
         self._apply_theme(self.settings.get('theme', 'system'), persist=False)
+        self._apply_font_scale(window)
 
     def _show_tutorial(self):
         """将打包在本地的双语 README 渲染成离线阅读页面。"""
@@ -3081,45 +3383,128 @@ class WildCamSorter:
     # ==================== UI：显示区 ====================
     
     def _setup_display_area(self):
-        """
-        构建显示区（占窗口上部 5/6）。
-        2x2 网格：4个 MediaPanel 等大排列。
-        """
+        """组内1–9文件自适应网格，更多文件分页，不缩成不可看的缩略图。"""
         self.display_frame = tk.Frame(self.root, bg=COLOR_BG)
         self.display_frame.grid(row=1, column=0, sticky='nsew')
-        
-        # 配置2x2网格权重：行列均等分
-        for row in range(2):
-            self.display_frame.grid_rowconfigure(row, weight=1, uniform='row')
-        for col in range(2):
-            self.display_frame.grid_columnconfigure(col, weight=1, uniform='col')
-        
-        # 创建4个媒体面板
-        panel_configs = [
-            (0, 0, 0, "媒体 1"),
-            (0, 1, 1, "媒体 2"),
-            (1, 0, 2, "媒体 3"),
-            (1, 1, 3, "媒体 4"),
-        ]
-        
-        for row, col, idx, title in panel_configs:
-            panel = MediaPanel(self.display_frame, idx, title)
-            panel.frame.grid(row=row, column=col, sticky='nsew', padx=1, pady=1)
+        for col in range(12):
+            self.display_frame.grid_columnconfigure(col, weight=1, uniform='media')
+        self._panel_page = 0
+        for idx in range(4):
+            panel = MediaPanel(self.display_frame, idx, f'媒体 {idx + 1}')
             panel.set_toggle_callback(self._toggle_file_selection)
             panel.set_fullscreen_callback(self._open_fullscreen)
             panel.set_refresh_callback(self._on_panel_refresh)
-            # 初始化迷你操作区（但隐藏）
             panel.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
             self._panels.append(panel)
-        
-        # 每文件独立选择记录 {file_index: set(species_names)}
         self.per_file_species = {}
-        
-        # 溢出文件行（当组内文件>4时显示）
-        self.display_frame.grid_rowconfigure(2, weight=0)  # 溢出行的权重为0（默认隐藏）
-        self.overflow_frame = tk.Frame(self.display_frame, bg=COLOR_BG)
-        self.overflow_panels = []  # 额外的MediaPanel列表
-    
+        self.overflow_panels = []
+        self.panel_page_controls = tk.Frame(self.display_frame, bg=COLOR_PANEL_BG)
+        self.page_prev = create_button(
+            self.panel_page_controls, text='◀ 前9个文件',
+            command=lambda: self._change_panel_page(-1))
+        self.page_prev.pack(side=tk.LEFT, padx=8)
+        self.page_label = tk.Label(self.panel_page_controls, bg=COLOR_PANEL_BG,
+                                   fg=COLOR_TEXT)
+        self.page_label.pack(side=tk.LEFT, padx=8)
+        self.page_next = create_button(
+            self.panel_page_controls, text='后9个文件 ▶',
+            command=lambda: self._change_panel_page(1))
+        self.page_next.pack(side=tk.LEFT, padx=8)
+
+    def _change_panel_page(self, delta):
+        page = self._panel_page + delta
+        if not 0 <= page < (len(self.current_group_files) + 8) // 9:
+            return
+        self._stop_video()
+        self._panel_page = page
+        self._preview_generation += 1
+        for work_queue in (self._image_preview_queue, self._video_preview_queue):
+            try:
+                while True:
+                    work_queue.get_nowait()
+            except queue.Empty:
+                pass
+        self._render_group_page()
+        self._update_all_panel_selections()
+
+    def _render_group_page(self):
+        """仅解码当前页的文件；选择状态仍以整组的文件序号保存。"""
+        for panel in self._panels + self.overflow_panels:
+            panel.frame.grid_forget()
+            panel.file_path = None
+        page_start = self._panel_page * 9
+        indices = list(range(page_start, min(page_start + 9,
+                                             len(self.current_group_files))))
+        if not indices:
+            return
+        video_local = next((i for i, index in enumerate(indices)
+                            if is_video_file(os.path.basename(self.current_group_files[index]))),
+                           None)
+        layout = media_panel_layout(len(indices), video_local)
+        total_rows = max(row + row_span for _, row, _, row_span, _ in layout)
+        for row in range(3):
+            self.display_frame.grid_rowconfigure(row, weight=int(row < total_rows),
+                                                  uniform='media-row' if row < total_rows else '')
+        for local, row, col, row_span, col_span in layout:
+            index = indices[local]
+            if local < 4:
+                panel = self._panels[local]
+                panel.index = index
+            elif local - 4 < len(self.overflow_panels):
+                panel = self.overflow_panels[local - 4]
+                panel.index = index
+            else:
+                panel = MediaPanel(self.display_frame, index, f'媒体 {index + 1}')
+                panel.set_toggle_callback(self._toggle_file_selection)
+                panel.set_fullscreen_callback(self._open_fullscreen)
+                panel.set_refresh_callback(self._on_panel_refresh)
+                panel.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
+                self.overflow_panels.append(panel)
+            panel.frame.grid(row=row, column=col, rowspan=row_span,
+                             columnspan=col_span, sticky='nsew', padx=1, pady=1)
+        if len(self.current_group_files) > 9:
+            self.panel_page_controls.grid(row=3, column=0, columnspan=12, sticky='ew')
+            self.page_label.config(text=f'第 {self._panel_page + 1} / '
+                                        f'{(len(self.current_group_files) + 8) // 9} 页')
+            self.page_prev.config(state=tk.NORMAL if self._panel_page else tk.DISABLED)
+            self.page_next.config(state=tk.NORMAL if page_start + 9 < len(self.current_group_files)
+                                  else tk.DISABLED)
+        else:
+            self.panel_page_controls.grid_forget()
+        self._preview_pending.clear()
+        self._preview_completed_panels.clear()
+        self._preview_pending_images = sum(
+            not is_video_file(os.path.basename(self.current_group_files[index]))
+            for index in indices)
+        self._pending_video_start = None
+        self._autoplay_video_preview_ready = False
+        generation = self._preview_generation
+        video_started = False
+        for panel in self._panels + self.overflow_panels:
+            if panel.file_path is None and panel.index not in indices:
+                continue
+            index = panel.index
+            if index not in indices:
+                continue
+            file_path = self.current_group_files[index]
+            panel.label_text = self._media_label_for_index(index)
+            panel.display_loading(file_path, panel.label_text)
+            self._queue_preview(panel, file_path, generation)
+            panel.set_selected(self.selected_flags[index])
+            if not video_started and is_video_file(os.path.basename(file_path)):
+                video_started = True
+                self._pending_video_start = (generation, file_path, panel)
+        if self._video_start_after_id is not None:
+            self.root.after_cancel(self._video_start_after_id)
+            self._video_start_after_id = None
+        if self._pending_video_start is not None:
+            self._video_start_after_id = self.root.after(
+                VIDEO_AUTOPLAY_FALLBACK_MS,
+                lambda g=generation: self._maybe_start_pending_video(g, force=True))
+        if hasattr(self, 'settings'):
+            self._apply_theme(self.settings.get('theme', 'system'),
+                              persist=False, window=self.display_frame)
+
     # ==================== UI：操作区 ====================
     
     def _setup_control_area(self):
@@ -3167,6 +3552,10 @@ class WildCamSorter:
             command=self._on_new_species
         )
         self.btn_new.pack(side=tk.LEFT, padx=4)
+        self.btn_edit_done = create_button(
+            left_frame, text='完成编辑', font=('微软雅黑', 10),
+            bg='#1565C0', fg='white', command=self._exit_category_edit,
+            padx=8, pady=7)
 
         # Species names and their count are user-defined: scroll this part
         # horizontally instead of allowing it to push navigation off-screen.
@@ -3175,16 +3564,16 @@ class WildCamSorter:
         self.species_canvas = tk.Canvas(species_container, bg='#1A1A1A',
                                         height=43, highlightthickness=0)
         self.species_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
-        species_scroll = tk.Scrollbar(species_container, orient=tk.HORIZONTAL,
+        self.species_scroll = tk.Scrollbar(species_container, orient=tk.HORIZONTAL,
                                       command=self.species_canvas.xview)
-        species_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        self.species_canvas.configure(xscrollcommand=species_scroll.set)
+        self.species_canvas.configure(xscrollcommand=self.species_scroll.set)
         self.species_frame = tk.Frame(self.species_canvas, bg='#1A1A1A')
         self.species_canvas.create_window((0, 0), window=self.species_frame,
                                           anchor=tk.NW)
         self.species_frame.bind('<Configure>', lambda _event:
                                 self.species_canvas.configure(
                                     scrollregion=self.species_canvas.bbox('all')))
+        self.species_canvas.bind('<Configure>', lambda _event: self._update_species_scrollbar())
         
         # --- 右侧：导航 + 信息 ---
         right_frame = tk.Frame(inner, bg='#1A1A1A')
@@ -3282,8 +3671,32 @@ class WildCamSorter:
     # ==================== 键盘绑定 ====================
     
     def _bind_keys(self):
-        """键盘快捷键已全部移除，所有操作由鼠标点击完成"""
-        pass
+        """只在主分类界面处理空格和左右键；查看器拥有自己的空格行为。"""
+        self.root.bind('<space>', self._on_main_space)
+        self.root.bind('<Left>', lambda event: self._on_main_direction(-1, event))
+        self.root.bind('<Right>', lambda event: self._on_main_direction(1, event))
+        self.root.bind('<Escape>', lambda _event: self._exit_category_edit())
+
+    def _main_shortcut_allowed(self):
+        if self._viewer_open or not self.current_group_files or self._scan_dialog:
+            return False
+        focus = self.root.focus_get()
+        return not isinstance(focus, (tk.Entry, tk.Text, ttk.Combobox, ttk.Scale))
+
+    def _on_main_space(self, event=None):
+        if not self._main_shortcut_allowed():
+            return None
+        now = time.monotonic()
+        if now - self._last_space_classify > .08:
+            self._last_space_classify = now
+            self._on_empty()
+        return 'break'
+
+    def _on_main_direction(self, step, event=None):
+        if not self._main_shortcut_allowed():
+            return None
+        self._prev_group() if step < 0 else self._next_group()
+        return 'break'
     
     # ==================== 数据初始化 ====================
     
@@ -3337,12 +3750,14 @@ class WildCamSorter:
 
                 progress_file = os.path.join(parent_dir, '.wildcam_progress.json')
                 processed_groups, class_history = load_progress_snapshot(progress_file)
+                class_history = reconcile_category_history(class_history, target_dir)
 
                 # 每次都核对输出目录，才能发现其他人手工复制的新分类。
                 # 该扫描和CSV补写均在工作线程，不会冻住主窗口。
                 species_list, existing_files = scan_classified_media(
                     target_dir, os.path.basename(source_dir), report, cancel_event
                 )
+                species_list = ordered_categories(target_dir, species_list)
                 backfilled_count = backfill_manual_csv(
                     source_dir, target_dir, existing_files, report, cancel_event
                 )
@@ -3602,7 +4017,7 @@ class WildCamSorter:
         弹出路径选择对话框：一个窗口内同时选择输入和输出文件夹。
         确定后完成初始化，取消则保持空状态（可用工具栏按钮随时开始）。
         """
-        if self._pending_group_indices:
+        if self._pending_group_indices or self._migration_pending:
             messagebox.showinfo(
                 "请稍候",
                 f"后台仍在保存 {len(self._pending_group_indices)} 组分类。\n"
@@ -3620,6 +4035,7 @@ class WildCamSorter:
             initial_segments=suggested_segments or self.capture_segments or None,
             initial_selection=(self.selection_start, self.selection_end)
         )
+        self._apply_font_scale(dlg.window)
         self.root.wait_window(dlg.window)  # 阻塞直到对话框关闭
         
         if dlg.result:
@@ -3662,10 +4078,8 @@ class WildCamSorter:
         if not self.target_dir:
             return
         # 清空旧物种列表，只保留输出目录中实际存在的类别
-        self.species_list = []
         existing = find_existing_species_folders(self.target_dir, self.source_dir)
-        for sp in existing:
-            self.species_list.append(sp)
+        self.species_list = ordered_categories(self.target_dir, existing)
         # 退出多类模式（物种列表变了，旧选择可能失效）
         if self.multi_mode:
             self.multi_mode = False
@@ -3866,72 +4280,9 @@ class WildCamSorter:
         if is_processed and rel_path in self.class_history:
             prev_species = self.class_history[rel_path].get('species', '')
         
-        # 先瞬间切换全部面板身份，再由后台线程解码缩略图。这样大图和慢视频
-        # 不会阻塞分类按钮；只有用户在本组停留片刻时才启动实时视频。
-        video_started = False
-        for panel_idx in range(4):
-            panel = self._panels[panel_idx]
-            
-            if panel_idx < len(self.current_group_files):
-                file_path = self.current_group_files[panel_idx]
-                filename = os.path.basename(file_path)
-                panel.label_text = self._media_label_for_index(panel_idx)
-
-                panel.display_loading(file_path, panel.label_text)
-                self._queue_preview(panel, file_path, preview_generation)
-                if is_video_file(filename) and not video_started:
-                    video_started = True
-                    self._pending_video_start = (preview_generation, file_path, panel)
-            else:
-                panel.label_text = f"媒体 {panel_idx + 1}"
-                panel.display_placeholder()
-        
-        # ---- 溢出文件处理（>4个文件时）----
-        n_extra = len(self.current_group_files) - 4
-        # 清除旧的溢出面板
-        for op in self.overflow_panels:
-            op.frame.destroy()
-        self.overflow_panels.clear()
-        
-        if n_extra > 0:
-            # 显示溢出行
-            self.display_frame.grid_rowconfigure(2, weight=0)
-            self.overflow_frame.grid(row=2, column=0, columnspan=2, sticky='ew', padx=2, pady=2)
-            self.overflow_frame.grid_propagate(False)
-            # 配置溢出行的列权重（等分）
-            for c in range(n_extra):
-                self.overflow_frame.grid_columnconfigure(c, weight=1)
-            
-            for i in range(n_extra):
-                file_idx = 4 + i
-                file_path = self.current_group_files[file_idx]
-                op = MediaPanel(
-                    self.overflow_frame, file_idx, self._media_label_for_index(file_idx)
-                )
-                op.frame.grid(row=0, column=i, sticky='nsew', padx=2, pady=2)
-                op.set_toggle_callback(self._toggle_file_selection)
-                op.set_fullscreen_callback(self._open_fullscreen)
-                op.set_refresh_callback(self._on_panel_refresh)
-                op.setup_mini_ops(self.species_list, self._on_panel_species_select, None)
-                op.display_loading(file_path, op.label_text)
-                self._queue_preview(op, file_path, preview_generation)
-                if is_video_file(os.path.basename(file_path)) and not video_started:
-                    video_started = True
-                    self._pending_video_start = (preview_generation, file_path, op)
-                op.set_selected(self.selected_flags[file_idx])
-                self.overflow_panels.append(op)
-        else:
-            # 隐藏溢出行
-            self.overflow_frame.grid_forget()
-            self.display_frame.grid_rowconfigure(2, weight=0)
-
-        # 视频首帧与图片均完成后再打开实时解码，避免同一视频被同时打开两次。
-        # 极慢或损坏文件由兜底定时器放行，不能让自动播放永久等待。
-        if self._pending_video_start is not None:
-            self._video_start_after_id = self.root.after(
-                VIDEO_AUTOPLAY_FALLBACK_MS,
-                lambda g=preview_generation: self._maybe_start_pending_video(g, force=True)
-            )
+        # 按实际数量重新排版；切页只替换画面，不丢失整组分类选择。
+        self._panel_page = 0
+        self._render_group_page()
 
         # 图片线程空闲时预读下一组。缓存只保留少量缩略图，不随500G目录增长。
         if self._performance_settings.get('prefetch_next', True):
@@ -3979,6 +4330,11 @@ class WildCamSorter:
             if value is not None:
                 self._preview_cache[cache_key] = value
                 return value.copy()
+            # A prefetched first frame may use the previous group's panel
+            # dimensions. Reuse it for immediate display, keeping its aspect.
+            for key in reversed(self._preview_cache):
+                if key[0] == cache_key[0]:
+                    return self._preview_cache[key].copy()
         return None
 
     def _preview_cache_put(self, cache_key, image):
@@ -4005,24 +4361,19 @@ class WildCamSorter:
         pending_key = (generation, panel.index, file_path)
         self._preview_pending.add(pending_key)
 
-        if media_kind == 'image':
-            cache_key = (file_path, width, height)
-            cached = self._preview_cache_get(cache_key)
-            if cached is not None:
-                self._preview_result_queue.put(
-                    (generation, panel.index, file_path, cached, None, media_kind,
-                     media_file_time(file_path))
-                )
-            else:
-                job = (
-                    0, self._next_preview_sequence(), generation, panel.index,
-                    file_path, width, height, False,
-                )
-                self._image_preview_queue.put_nowait(job)
+        cache_key = (file_path, width, height)
+        cached = self._preview_cache_get(cache_key)
+        if cached is not None:
+            self._preview_result_queue.put(
+                (generation, panel.index, file_path, cached, None, media_kind,
+                 media_file_time(file_path))
+            )
         else:
-            job = (generation, panel.index, file_path, width, height, False)
+            job = (0, self._next_preview_sequence(), generation, panel.index,
+                   file_path, width, height, False)
             try:
-                self._video_preview_queue.put_nowait(job)
+                (self._video_preview_queue if media_kind == 'video'
+                 else self._image_preview_queue).put_nowait(job)
             except queue.Full:
                 self._preview_result_queue.put(
                     (generation, panel.index, file_path, None,
@@ -4038,9 +4389,8 @@ class WildCamSorter:
             return
         default_width, default_height = self._panels[0]._calc_display_size()
         width, height = max(default_width, 320), max(default_height, 200)
-        for file_path in self.groups[next_index]:
-            if is_video_file(os.path.basename(file_path)):
-                continue
+        for file_path in self.groups[next_index][:9]:
+            media_kind = 'video' if is_video_file(os.path.basename(file_path)) else 'image'
             cache_key = (file_path, width, height)
             with self._preview_cache_lock:
                 already_cached = cache_key in self._preview_cache
@@ -4050,7 +4400,11 @@ class WildCamSorter:
                 10, self._next_preview_sequence(), generation, -1,
                 file_path, width, height, True,
             )
-            self._image_preview_queue.put_nowait(job)
+            try:
+                (self._video_preview_queue if media_kind == 'video'
+                 else self._image_preview_queue).put_nowait(job)
+            except queue.Full:
+                pass
 
     @staticmethod
     def _decode_image_preview(file_path: str, width: int, height: int):
@@ -4069,10 +4423,7 @@ class WildCamSorter:
         """后台读取缩略图；图片和视频各自使用独立队列。"""
         while True:
             job = work_queue.get()
-            if media_kind == 'image':
-                _, _, generation, panel_index, file_path, width, height, preload = job
-            else:
-                generation, panel_index, file_path, width, height, preload = job
+            _, _, generation, panel_index, file_path, width, height, preload = job
             if not preload and generation != self._preview_generation:
                 continue
             image = None
@@ -4097,9 +4448,9 @@ class WildCamSorter:
             finally:
                 if cap is not None:
                     cap.release()
+            if image is not None:
+                self._preview_cache_put((file_path, width, height), image)
             if preload:
-                if image is not None:
-                    self._preview_cache_put((file_path, width, height), image)
                 continue
             if generation != self._preview_generation:
                 continue
@@ -4109,10 +4460,8 @@ class WildCamSorter:
             )
 
     def _panel_for_index(self, panel_index: int):
-        if panel_index < 4:
-            return self._panels[panel_index]
-        extra = panel_index - 4
-        return self.overflow_panels[extra] if extra < len(self.overflow_panels) else None
+        return next((panel for panel in self._panels + self.overflow_panels
+                     if panel.index == panel_index and panel.file_path is not None), None)
 
     def _poll_preview_results(self):
         """只显示当前组结果，过时任务直接释放，避免高速浏览时回闪。"""
@@ -4208,6 +4557,7 @@ class WildCamSorter:
         self._video_generation += 1
         generation = self._video_generation
         self._video_stop = threading.Event()
+        self._video_pause = threading.Event()
         self._video_queue = queue.Queue(maxsize=2)
         stop_event = self._video_stop
         frame_queue = self._video_queue
@@ -4224,121 +4574,109 @@ class WildCamSorter:
     
     def _video_decode_worker(self, video_path: str, stop_event: threading.Event,
                              frame_queue: queue.Queue, generation: int):
-        """
-        视频解码线程：持续读帧转RGB放入队列，循环播放。
-        所有可能阻塞的解码操作都在此线程，UI线程只消费队列。
-        """
+        """按5倍媒体时间每秒最多呈现20帧；队列满时不做无效解码。"""
         cap = None
-        av_container = None
-        av_iter = None
-        fps = 25
-        
+        container = None
         try:
-            # ---- 方案1: OpenCV（按系统选择FFmpeg/DirectShow/AVFoundation） ----
             cap = open_video_capture(video_path)
-            
-            # ---- 方案2: PyAV 后备 ----
+            av_stream = None
             if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                    cap = None
                 try:
                     import av
-                    av_container = av.open(video_path)
-                    if not av_container.streams.video:
-                        av_container.close()
-                        av_container = None
-                    else:
-                        av_iter = av_container.decode(video=0)
-                        # 预读一帧验证
-                        if next(av_iter, None) is None:
-                            av_container.close()
-                            av_container = None
+                    container = av.open(video_path)
+                    av_stream = container.streams.video[0]
+                    av_iter = container.decode(av_stream)
                 except Exception:
-                    av_container = None
-            
-            # 获取帧率（限制显示节奏用）
-            if cap and cap.isOpened():
-                fps = cap.get(cv2.CAP_PROP_FPS)
-            if not (0 < fps <= 120):
-                fps = 25
-            
-            source = cap if (cap and cap.isOpened()) else av_container
-            if source is None:
-                # 全部失败：通知UI显示错误
-                self.root.after(
-                    0, lambda: self._video_load_failed(video_path, generation)
-                )
+                    if container is not None:
+                        container.close()
+                    container = None
+            if cap is None and container is None:
+                self.root.after(0, lambda: self._video_load_failed(video_path, generation))
                 return
-            
-            # ---- 解码循环 ----
-            fail_count = 0  # 连续读取失败计数，防止死循环
+            fps = float(cap.get(cv2.CAP_PROP_FPS)) if cap is not None else (
+                float(av_stream.average_rate or 25))
+            if not 0 < fps <= 120:
+                fps = 25.0
+            pause = self._video_pause
+            started = time.monotonic()
+            paused_since = None
+            frame_index = 0
+            displayed = 0
             while not stop_event.is_set():
-                frame = None
-                if cap is not None and cap.isOpened():
-                    # 跳帧：连读最多3帧取最新，避免解码慢于显示时堆积
-                    for _ in range(3):
-                        ret, f = cap.read()
-                        if ret:
-                            frame = f
-                        else:
+                if pause.is_set():
+                    if paused_since is None:
+                        paused_since = time.monotonic()
+                    stop_event.wait(.04)
+                    continue
+                if paused_since is not None:
+                    started += time.monotonic() - paused_since
+                    paused_since = None
+                now = time.monotonic()
+                next_display = started + displayed / MAIN_VIDEO_DISPLAY_FPS
+                if next_display > now:
+                    stop_event.wait(min(.05, next_display - now))
+                    continue
+                target_index = int((now - started) * fps * MAIN_VIDEO_RATE)
+                if cap is not None:
+                    to_skip = max(0, target_index - frame_index)
+                    if to_skip > fps * 2:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, target_index)
+                        frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                        to_skip = max(0, target_index - frame_index)
+                    for _ in range(min(to_skip, int(fps * 2))):
+                        if not cap.grab():
                             break
-                    if frame is None:
-                        # 播放完，循环；但连续失败过多说明视频不可读，退出
-                        fail_count += 1
-                        if fail_count > 50:
-                            break
+                        frame_index += 1
+                    ok, frame = cap.read()
+                    if not ok:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        ret, frame = cap.read()
-                        if not ret:
-                            continue
-                    else:
-                        fail_count = 0
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                elif av_container is not None:
-                    try:
-                        av_frame = next(av_iter, None)
-                        if av_frame is None:
-                            # 循环：seek到开头
-                            av_container.seek(0)
-                            av_iter = av_container.decode(video=0)
-                            av_frame = next(av_iter, None)
-                        if av_frame is None:
-                            fail_count += 1
-                            if fail_count > 50:
-                                break
-                            continue
-                        fail_count = 0
-                        frame_rgb = np.array(av_frame.to_image())
-                    except StopIteration:
-                        av_container.seek(0)
-                        av_iter = av_container.decode(video=0)
+                        frame_index = 0
+                        started = time.monotonic()
+                        displayed = 0
                         continue
-                    except Exception:
-                        break
+                    frame_index += 1
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 else:
+                    frame = None
+                    for _ in range(max(1, min(target_index - frame_index + 1, int(fps * 2)))):
+                        frame = next(av_iter, None)
+                        if frame is None:
+                            break
+                        frame_index += 1
+                    if frame is None:
+                        container.seek(0)
+                        av_iter = container.decode(av_stream)
+                        frame_index = displayed = 0
+                        started = time.monotonic()
+                        continue
+                    frame_rgb = np.asarray(frame.to_image())
+                # Only create a UI frame if it is still the currently selected group.
+                if generation != self._video_generation or stop_event.is_set():
                     break
-                
-                # 放入队列（满则丢弃最旧帧，保证队列不阻塞线程）
                 try:
                     frame_queue.put_nowait(frame_rgb)
                 except queue.Full:
                     try:
                         frame_queue.get_nowait()
                         frame_queue.put_nowait(frame_rgb)
-                    except Exception:
+                    except queue.Empty:
                         pass
-        except Exception:
-            pass  # 解码线程异常不影响UI
+                displayed += 1
+                # Catch up only by skipping frames, never by decoding faster than
+                # the display can consume them (or spinning when the queue is full).
+                displayed = max(displayed, int((time.monotonic() - started)
+                                               * MAIN_VIDEO_DISPLAY_FPS))
+        except Exception as exc:
+            self._log(f'主页面视频播放失败: {exc}', 'warning')
         finally:
             if cap is not None:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
-            if av_container is not None:
-                try:
-                    av_container.close()
-                except Exception:
-                    pass
-    
+                cap.release()
+            if container is not None:
+                container.close()
+
     def _video_load_failed(self, video_path: str, generation: int = None):
         """视频完全无法打开时显示错误提示"""
         if (not self.video_playing
@@ -4393,7 +4731,7 @@ class WildCamSorter:
             if new_w > 0 and new_h > 0:
                 try:
                     pil_img = Image.fromarray(frame_rgb)
-                    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+                    pil_img.thumbnail((new_w, new_h), Image.Resampling.BILINEAR)
                     self.video_photo = ImageTk.PhotoImage(pil_img)
                     panel.media_label.config(image=self.video_photo, text='')
                 except Exception:
@@ -4408,8 +4746,10 @@ class WildCamSorter:
             return
         self.video_playing = not self.video_playing
         if self.video_playing:
+            self._video_pause.clear()
             self._update_video_frame()
         else:
+            self._video_pause.set()
             if self.video_after_id:
                 self.root.after_cancel(self.video_after_id)
                 self.video_after_id = None
@@ -4449,13 +4789,9 @@ class WildCamSorter:
         self.selected_flags[index] = not self.selected_flags[index]
         self._update_all_panel_selections()
         
-        # 反选（取消选中）→ 显示该框的迷你标签栏；重新选中 → 隐藏
-        if index < 4:
-            panel = self._panels[index]
-        else:
-            overflow_idx = index - 4
-            panel = self.overflow_panels[overflow_idx] if overflow_idx < len(self.overflow_panels) else None
-        
+        # 页面内外统一通过全组文件序号定位面板。
+        panel = self._panel_for_index(index)
+
         if panel:
             if not self.selected_flags[index]:
                 panel.show_mini_ops()
@@ -4471,14 +4807,11 @@ class WildCamSorter:
         self.label_select_hint.config(text=f"已选 {n_selected}/{n_files}")
     
     def _update_all_panel_selections(self):
-        """同步所有面板的选中状态视觉样式"""
-        for panel_idx in range(4):
-            panel = self._panels[panel_idx]
-            if panel_idx < len(self.current_group_files):
-                panel.set_selected(self.selected_flags[panel_idx])
-            else:
-                panel.set_selected(False)
-    
+        """同步当前页的选中状态，不重置其他页的分类标记。"""
+        for panel in self._panels + self.overflow_panels:
+            if panel.file_path and panel.index < len(self.selected_flags):
+                panel.set_selected(self.selected_flags[panel.index])
+
     def _open_fullscreen(self, panel_index: int):
         """
         打开全分辨率查看窗口。
@@ -4498,17 +4831,17 @@ class WildCamSorter:
             self._toggle_play_pause()
         
         # 创建并打开全分辨率查看器（模态窗口，阻塞直到关闭）
-        viewer = FullScreenViewer(self.root, file_path, is_video=is_video)
-        if hasattr(self, 'settings'):
-            # Opening a viewer must not reconfigure the maximized main window.
-            self._apply_theme(self.settings.get('theme', 'system'),
-                              persist=False, window=viewer.window)
-        # 等待查看器窗口关闭
-        self.root.wait_window(viewer.window)
-        
-        # 只有原本正在播放时才恢复；查看图片也不会把主预览永久暂停。
-        if was_playing and not self.video_playing:
-            self._toggle_play_pause()
+        self._viewer_open = True
+        try:
+            viewer = FullScreenViewer(self.root, file_path, is_video=is_video)
+            if hasattr(self, 'settings'):
+                self._apply_theme(self.settings.get('theme', 'system'),
+                                  persist=False, window=viewer.window)
+            self.root.wait_window(viewer.window)
+        finally:
+            self._viewer_open = False
+            if was_playing and not self.video_playing:
+                self._toggle_play_pause()
     
     def _on_panel_species_select(self, file_index: int, selected_species: set):
         """
@@ -4538,6 +4871,8 @@ class WildCamSorter:
     
     def _on_species_click(self, species_name: str):
         """物种按钮：多类模式下toggle选中，否则直接分类"""
+        if self._editing_categories or self._migration_pending:
+            return
         if self.multi_mode:
             # 多类模式：切换该物种的选中状态
             if species_name in self.multi_selected:
@@ -4617,6 +4952,8 @@ class WildCamSorter:
         # 添加到物种列表并重建按钮
         if species_name not in self.species_list:
             self.species_list.append(species_name)
+            if self.target_dir:
+                save_category_order(self.target_dir, self.species_list)
             self._rebuild_species_buttons()
         
         # 多类模式下自动选中新物种
@@ -4642,6 +4979,10 @@ class WildCamSorter:
         
         所有操作都是复制（shutil.copy2），原始文件保留不动。
         """
+        if self._migration_pending:
+            self.label_status.config(text='正在迁移类别，请等待保存完成',
+                                     fg=self._theme_color('#FFB74D'))
+            return
         if self._scan_thread is not None and self._scan_thread.is_alive():
             self.label_status.config(text="正在切换数据文件夹，请等待扫描完成", fg=self._theme_color('#FFB74D'))
             return
@@ -4710,6 +5051,17 @@ class WildCamSorter:
             job = self._classify_queue.get()
             if job is None:
                 return
+            if job.get('kind') == 'migrate_category':
+                try:
+                    count = migrate_category_storage(job['target_dir'],
+                                                     job['old'], job['new'])
+                    self._classify_result_queue.put({
+                        'kind': 'migration', 'job': job, 'count': count, 'error': None})
+                except Exception as exc:
+                    self._log(f'类别迁移失败: {exc}\n{traceback.format_exc()}', 'error')
+                    self._classify_result_queue.put({
+                        'kind': 'migration', 'job': job, 'count': 0, 'error': str(exc)})
+                continue
             errors = []
             dest_files = []
             staged_files = []
@@ -4789,6 +5141,9 @@ class WildCamSorter:
             while True:
                 result = self._classify_result_queue.get_nowait()
                 handled = True
+                if result.get('kind') == 'migration':
+                    self._on_migration_result(result)
+                    continue
                 job = result['job']
                 index = job['group_index']
                 self._pending_group_indices.discard(index)
@@ -4823,7 +5178,8 @@ class WildCamSorter:
             pass
         if handled:
             self._update_progress_bar()
-        if self._pending_group_indices or not self._classify_result_queue.empty():
+        if (self._pending_group_indices or self._migration_pending
+                or not self._classify_result_queue.empty()):
             self._schedule_classification_poll(40)
 
     def _schedule_classification_poll(self, delay_ms: int = 40):
@@ -5088,6 +5444,17 @@ class WildCamSorter:
             self._log(f"无法写入CSV记录: {e}", 'warning')
     
     # ==================== 物种按钮管理 ====================
+
+    def _update_species_scrollbar(self):
+        if not hasattr(self, 'species_scroll'):
+            return
+        needed = (self.species_frame.winfo_reqwidth() >
+                  self.species_canvas.winfo_width() + 2)
+        if needed and not self.species_scroll.winfo_manager():
+            self.species_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        elif not needed and self.species_scroll.winfo_manager():
+            self.species_scroll.pack_forget()
+            self.species_canvas.xview_moveto(0)
     
     def _rebuild_species_buttons(self):
         """重建物种按钮（当物种列表变化时）"""
@@ -5095,6 +5462,7 @@ class WildCamSorter:
         for widget in self.species_frame.winfo_children():
             widget.destroy()
         self.species_buttons.clear()
+        self._species_tiles.clear()
         
         if not self.species_list:
             lbl = tk.Label(
@@ -5105,11 +5473,14 @@ class WildCamSorter:
             if hasattr(self, '_active_theme'):
                 self._apply_theme(self.settings.get('theme', 'system'),
                                   persist=False, window=self.species_frame)
+            self.root.after_idle(self._update_species_scrollbar)
             return
         
         for name in self.species_list:
+            tile = tk.Frame(self.species_frame, bg='#1A1A1A')
+            tile.pack(side=tk.LEFT, padx=3)
             btn = create_button(
-                self.species_frame,
+                tile,
                 text=name,
                 font=("微软雅黑", 11),
                 bg=COLOR_BUTTON_SPECIES, fg='white',
@@ -5118,7 +5489,18 @@ class WildCamSorter:
                 padx=12, pady=7,
                 command=lambda n=name: self._on_species_click(n)
             )
-            btn.pack(side=tk.LEFT, padx=3)
+            btn.pack(side=tk.LEFT)
+            btn.bind('<ButtonPress-1>', lambda _event, n=name: self._begin_category_press(n))
+            btn.bind('<ButtonRelease-1>', lambda _event: self._end_category_press())
+            btn.bind('<B1-Motion>', lambda event, n=name: self._drag_category(n, event))
+            btn.bind('<Button-3>', lambda _event: self._enter_category_edit())
+            remove = create_button(
+                tile, text='×', font=('微软雅黑', 9, 'bold'), bg='#B71C1C',
+                fg='white', padx=3, pady=0,
+                command=lambda n=name: self._prompt_delete_category(n))
+            if self._editing_categories:
+                remove.place(relx=1, x=2, y=-2, anchor=tk.NE)
+            self._species_tiles[name] = (tile, remove)
             self.species_buttons[name] = btn
         
         # 刷新所有面板的迷你按钮
@@ -5131,6 +5513,140 @@ class WildCamSorter:
         if hasattr(self, '_active_theme'):
             self._apply_theme(self.settings.get('theme', 'system'),
                               persist=False, window=self.species_frame)
+        self.root.after_idle(self._update_species_scrollbar)
+
+    def _begin_category_press(self, name):
+        self._end_category_press()
+        if self._editing_categories:
+            self._category_drag_name = name
+        elif self.target_dir and not self._migration_pending:
+            self._press_after_id = self.root.after(
+                600, lambda: self._enter_category_edit(name))
+
+    def _end_category_press(self):
+        if self._press_after_id is not None:
+            self.root.after_cancel(self._press_after_id)
+            self._press_after_id = None
+        if self._category_drag_name is not None:
+            self._category_drag_name = None
+
+    def _enter_category_edit(self, name=None):
+        self._press_after_id = None
+        if not self.target_dir or self._migration_pending:
+            return
+        self._editing_categories = True
+        self._category_drag_name = name
+        self.btn_edit_done.pack(side=tk.LEFT, padx=4)
+        for _tile, remove in self._species_tiles.values():
+            remove.place(relx=1, x=2, y=-2, anchor=tk.NE)
+        self.label_status.config(text='编辑分类：拖动按钮调整顺序，点击 × 删除并迁移分类',
+                                 fg=self._theme_color('#FFB74D'))
+
+    def _exit_category_edit(self):
+        if not self._editing_categories:
+            return None
+        self._end_category_press()
+        self._editing_categories = False
+        self.btn_edit_done.pack_forget()
+        for _tile, remove in self._species_tiles.values():
+            remove.place_forget()
+        return 'break'
+
+    def _drag_category(self, name, event):
+        if not self._editing_categories or self._category_drag_name != name:
+            return
+        current = self.species_list.index(name)
+        midpoint = event.x_root
+        target = current
+        for index, candidate in enumerate(self.species_list):
+            tile = self._species_tiles[candidate][0]
+            if midpoint < tile.winfo_rootx() + tile.winfo_width() // 2:
+                target = index
+                break
+        else:
+            target = len(self.species_list) - 1
+        if target != current:
+            self.species_list.insert(target, self.species_list.pop(current))
+            for category in self.species_list:
+                tile = self._species_tiles[category][0]
+                tile.pack_forget()
+                tile.pack(side=tk.LEFT, padx=3)
+            try:
+                save_category_order(self.target_dir, self.species_list)
+            except OSError as exc:
+                self._log(f'保存分类按钮顺序失败: {exc}', 'warning')
+            self.root.after_idle(self._update_species_scrollbar)
+
+    def _prompt_delete_category(self, name):
+        if self._migration_pending or self._pending_group_indices:
+            messagebox.showinfo('请稍候', '请等待后台分类保存后再迁移类别。', parent=self.root)
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f'删除类别：{name}')
+        dialog.geometry('460x235')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        tk.Label(dialog, text=f'确认删除「{name}」类别？',
+                 font=('微软雅黑', 12, 'bold')).pack(pady=(17, 8))
+        tk.Label(dialog, text='该类别下已分类的文件及 CSV 记录将迁移到：',
+                 wraplength=410).pack(pady=4)
+        choices = [other for other in self.species_list if other != name]
+        choices.append('空拍')
+        destination = tk.StringVar(value=choices[0])
+        ttk.Combobox(dialog, textvariable=destination, values=choices,
+                     state='readonly', width=25).pack(pady=7)
+        tk.Label(dialog, text='源照片和视频保持不变；遇到不同内容的同名文件将取消迁移。',
+                 wraplength=410).pack(pady=4)
+        buttons = tk.Frame(dialog)
+        buttons.pack(pady=12)
+        def confirm():
+            chosen = destination.get()
+            if chosen not in choices:
+                return
+            dialog.grab_release()
+            dialog.destroy()
+            self._migration_pending = True
+            self._exit_category_edit()
+            self._classify_queue.put({'kind': 'migrate_category',
+                                      'target_dir': self.target_dir,
+                                      'old': name, 'new': chosen})
+            self.label_status.config(text=f'正在后台迁移「{name}」至「{chosen}」…',
+                                     fg=self._theme_color('#FFB74D'))
+            self._schedule_classification_poll(1)
+        create_button(buttons, text='确认迁移并删除', command=confirm,
+                      bg='#B71C1C', fg='white').pack(side=tk.LEFT, padx=8)
+        create_button(buttons, text='取消', command=dialog.destroy,
+                      bg='#455A64', fg='white').pack(side=tk.LEFT, padx=8)
+
+    def _on_migration_result(self, result):
+        self._migration_pending = False
+        old, new = result['job']['old'], result['job']['new']
+        if result['error']:
+            self.label_status.config(text=f'迁移失败：{result["error"]}', fg='#F44336')
+            messagebox.showerror('迁移未完成', result['error'], parent=self.root)
+            return
+        self.class_history = reconcile_category_history(self.class_history,
+                                                         self.target_dir)
+        self._save_progress()
+        self.species_list = [category for category in self.species_list if category != old]
+        was_selected = old in self.multi_selected
+        self.multi_selected.discard(old)
+        if was_selected and new != '空拍' and new in self.species_list:
+            self.multi_selected.add(new)
+        for index, names in list(self.per_file_species.items()):
+            if old in names:
+                names.discard(old)
+                if new != '空拍':
+                    names.add(new)
+            if not names:
+                del self.per_file_species[index]
+        try:
+            save_category_order(self.target_dir, self.species_list)
+        except OSError as exc:
+            self._log(f'保存分类按钮顺序失败: {exc}', 'warning')
+        self._rebuild_species_buttons()
+        self._log(f'类别「{old}」已迁移至「{new}」：{result["count"]} 个文件')
+        self.label_status.config(text=f'✅ 类别「{old}」已迁移至「{new}」', fg='#4CAF50')
     
     # ==================== 导航 ====================
     
@@ -5280,11 +5796,12 @@ class WildCamSorter:
     
     def _on_close(self):
         """关闭窗口清理"""
-        if not self._closing and self._pending_group_indices:
+        if not self._closing and (self._pending_group_indices or self._migration_pending):
             pending = len(self._pending_group_indices)
             wait_for_finish = messagebox.askyesno(
                 "分类仍在保存",
-                f"后台还有 {pending} 组正在复制并写入记录。\n\n"
+                f"后台还有 {pending} 组正在复制并写入记录。"
+                + ('类别迁移仍在进行。' if self._migration_pending else '') + '\n\n'
                 "是否等待全部保存完成后自动退出？\n"
                 "选择“否”将返回程序，不会强制中断记录。",
                 parent=self.root
@@ -5308,7 +5825,7 @@ class WildCamSorter:
 
     def _close_when_classification_finishes(self):
         self._schedule_classification_poll(1)
-        if self._pending_group_indices:
+        if self._pending_group_indices or self._migration_pending:
             self.root.after(100, self._close_when_classification_finishes)
         else:
             self._on_close()
@@ -5381,14 +5898,10 @@ class WildCamSorter:
             return
         # 强制刷新视频面板尺寸缓存（下一帧即生效）
         self._cached_video_dims = (0, 0)
-        # 按真实文件类型重新缩放所有静态图片，不再假设第一个文件一定是视频。
-        for panel_idx in range(0, min(4, len(self.current_group_files))):
-            panel = self._panels[panel_idx]
+        # 尺寸变化时只提交当前页缩略图任务，避免UI线程重读原图。
+        for panel in self._panels + self.overflow_panels:
             if panel.file_path and is_image_file(os.path.basename(panel.file_path)):
-                panel.display_image(panel.file_path)
-        for panel in self.overflow_panels:
-            if panel.file_path and is_image_file(os.path.basename(panel.file_path)):
-                panel.display_image(panel.file_path)
+                self._queue_preview(panel, panel.file_path, self._preview_generation)
         self._update_progress_bar()
 
 

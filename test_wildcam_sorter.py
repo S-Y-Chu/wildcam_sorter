@@ -77,7 +77,7 @@ class FullScreenViewerTests(unittest.TestCase):
 
 
 class PlatformCompatibilityTests(unittest.TestCase):
-    def test_viewer_fills_macos_fullscreen_parent_without_resizing_it(self):
+    def test_viewer_stays_on_screen_when_parent_is_macos_fullscreen(self):
         parent = MagicMock()
         parent.winfo_width.return_value = 1920
         parent.winfo_height.return_value = 1080
@@ -86,12 +86,11 @@ class PlatformCompatibilityTests(unittest.TestCase):
         parent.state.return_value = 'normal'
         parent.attributes.return_value = True
         self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
-                         (1920, 1080, 0, 0))
+                         (1200, 800, 360, 140))
         parent.geometry.assert_not_called()
-        parent.state.assert_called_once_with()
         self.assertTrue(wildcam_sorter.mac_parent_is_fullscreen(parent, 1920, 1080))
 
-    def test_viewer_fills_windows_maximized_parent_and_macos_native_zoom(self):
+    def test_viewer_is_smaller_than_windows_maximized_parent(self):
         parent = MagicMock()
         parent.winfo_width.return_value = 1800
         parent.winfo_height.return_value = 950
@@ -100,11 +99,11 @@ class PlatformCompatibilityTests(unittest.TestCase):
         parent.state.return_value = 'zoomed'
         parent.attributes.return_value = False
         self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
-                         (1800, 950, 10, 15))
+                         (1200, 800, 360, 140))
         self.assertFalse(wildcam_sorter.mac_parent_is_fullscreen(parent, 1920, 1080))
         parent.state.return_value = 'normal'
         self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
-                         (1800, 950, 10, 15))
+                         (1200, 800, 360, 140))
 
     def test_native_mac_fullscreen_detected_if_tk_flag_not_set(self):
         parent = MagicMock()
@@ -122,7 +121,7 @@ class PlatformCompatibilityTests(unittest.TestCase):
         parent.state.return_value = 'normal'
         parent.attributes.return_value = False
         self.assertEqual(wildcam_sorter.viewer_window_bounds(parent, 1920, 1080),
-                         (1400, 950, 260, 55))
+                         (1200, 800, 360, 140))
 
     def test_warning_color_changes_with_theme_even_for_later_messages(self):
         app = WildCamSorter.__new__(WildCamSorter)
@@ -137,7 +136,10 @@ class PlatformCompatibilityTests(unittest.TestCase):
         app.species_frame = MagicMock()
         app.species_frame.winfo_children.return_value = []
         app.species_buttons = {}
+        app._species_tiles = {}
+        app._editing_categories = False
         app.species_list = ['牛', '羊']
+        app.root = MagicMock()
         app._panels = []
         app.overflow_panels = []
         app._active_theme = 'light'
@@ -146,10 +148,9 @@ class PlatformCompatibilityTests(unittest.TestCase):
         with patch.object(wildcam_sorter, 'create_button') as button_factory, \
                 patch.object(wildcam_sorter.tk, 'Frame') as frame_factory:
             app._rebuild_species_buttons()
-        self.assertEqual(button_factory.call_count, 2)
-        self.assertTrue(all(call.args[0] is app.species_frame
-                            for call in button_factory.call_args_list))
-        frame_factory.assert_not_called()
+        self.assertEqual(button_factory.call_count, 4)
+        self.assertEqual(frame_factory.call_count, 2)
+        self.assertEqual(len(app._species_tiles), 2)
         app._apply_theme.assert_called_once_with('light', persist=False,
                                                   window=app.species_frame)
 
@@ -305,7 +306,9 @@ class CaptureSuggestionTests(unittest.TestCase):
              patch.object(wildcam_sorter.time, 'monotonic', side_effect=[0, 4, 4, 4]):
             FullScreenViewer._viewer_decode_worker('/camera/video.mp4', commands,
                                                     results, stopped)
-        capture.set.assert_any_call(14, 4000)
+        # The slow player seeks to the media position associated with the
+        # frame clock, while the viewer starts at 0.5x.
+        capture.set.assert_any_call(14, 2000)
         capture.release.assert_called_once()
 
 
@@ -314,7 +317,7 @@ class PreviewPipelineTests(unittest.TestCase):
     def _make_app(self):
         app = WildCamSorter.__new__(WildCamSorter)
         app._image_preview_queue = wildcam_sorter.queue.PriorityQueue()
-        app._video_preview_queue = wildcam_sorter.queue.Queue(maxsize=32)
+        app._video_preview_queue = wildcam_sorter.queue.PriorityQueue(maxsize=32)
         app._preview_result_queue = wildcam_sorter.queue.Queue()
         app._preview_poll_after_id = None
         app._preview_task_sequence = 0
@@ -352,7 +355,7 @@ class PreviewPipelineTests(unittest.TestCase):
         image_job = app._image_preview_queue.get_nowait()
         video_job = app._video_preview_queue.get_nowait()
         self.assertEqual(image_job[4], '/camera/004.jpg')
-        self.assertEqual(video_job[2], '/camera/001.mp4')
+        self.assertEqual(video_job[4], '/camera/001.mp4')
 
     def test_polling_continues_while_last_job_is_in_flight(self):
         app = self._make_app()
@@ -777,6 +780,107 @@ class ClassificationQueueTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[-1]['文件名'], '100001.jpg')
+
+
+class Version112Tests(unittest.TestCase):
+    def test_layout_supports_three_five_and_nine_files(self):
+        three = wildcam_sorter.media_panel_layout(3, 2)
+        self.assertEqual(three[0], (2, 0, 0, 2, 6))
+        five = wildcam_sorter.media_panel_layout(5, 4)
+        self.assertEqual(five[0], (4, 0, 0, 2, 4))
+        self.assertEqual({cell[0] for cell in five}, set(range(5)))
+        self.assertEqual(len(wildcam_sorter.media_panel_layout(9)), 9)
+
+    def test_category_order_persists_and_includes_external_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wildcam_sorter.save_category_order(directory, ['狼', '牛'])
+            self.assertEqual(wildcam_sorter.ordered_categories(
+                directory, ['牛', '鹿', '狼']), ['狼', '牛', '鹿'])
+
+    def test_category_migration_updates_files_csv_history_and_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = os.path.join(directory, '狼')
+            dst = os.path.join(directory, '鹿')
+            os.makedirs(src)
+            os.makedirs(dst)
+            with open(os.path.join(src, '001.jpg'), 'wb') as handle:
+                handle.write(b'image')
+            csv_path = os.path.join(directory, 'wildcam_records.csv')
+            with open(csv_path, 'w', encoding='utf-8-sig', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=wildcam_sorter.CSV_HEADERS)
+                writer.writeheader()
+                writer.writerow({'文件名': '001.jpg', '物种名': '狼；鹿'})
+            count = wildcam_sorter.migrate_category_storage(directory, '狼', '鹿')
+            self.assertEqual(count, 1)
+            self.assertFalse(os.path.exists(src))
+            self.assertTrue(os.path.isfile(os.path.join(dst, '001.jpg')))
+            with open(csv_path, encoding='utf-8-sig', newline='') as handle:
+                self.assertEqual(list(csv.DictReader(handle))[0]['物种名'], '鹿')
+            original = {'a': {'species': '狼、鹿',
+                              'dest_files': [os.path.join(src, '001.jpg')]}}
+            actual = wildcam_sorter.reconcile_category_history(original, directory)
+            self.assertEqual(actual['a']['species'], '鹿')
+            self.assertEqual(actual['a']['dest_files'], [os.path.join(dst, '001.jpg')])
+
+    def test_collision_aborts_migration_before_changing_csv_or_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for category, contents in (('狼', b'one'), ('鹿', b'two')):
+                folder = os.path.join(directory, category)
+                os.makedirs(folder)
+                with open(os.path.join(folder, '001.jpg'), 'wb') as handle:
+                    handle.write(contents)
+            csv_path = os.path.join(directory, 'wildcam_records.csv')
+            with open(csv_path, 'w', encoding='utf-8') as handle:
+                handle.write('物种名\n狼\n')
+            with self.assertRaises(FileExistsError):
+                wildcam_sorter.migrate_category_storage(directory, '狼', '鹿')
+            self.assertTrue(os.path.exists(os.path.join(directory, '狼', '001.jpg')))
+            with open(csv_path, encoding='utf-8') as handle:
+                self.assertEqual(handle.read(), '物种名\n狼\n')
+
+    def test_migration_rolls_back_files_if_csv_commit_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = os.path.join(directory, '狼')
+            dst = os.path.join(directory, '鹿')
+            os.makedirs(src)
+            os.makedirs(dst)
+            source_file = os.path.join(src, '002.jpg')
+            with open(source_file, 'wb') as handle:
+                handle.write(b'original')
+            csv_path = os.path.join(directory, 'wildcam_records.csv')
+            with open(csv_path, 'w', encoding='utf-8') as handle:
+                handle.write('物种名\n狼\n')
+            actual_replace = os.replace
+            def fail_csv(source, target):
+                if target == csv_path and '.migration-' in source:
+                    raise OSError('simulated CSV disk error')
+                return actual_replace(source, target)
+            with patch.object(wildcam_sorter.os, 'replace', side_effect=fail_csv):
+                with self.assertRaisesRegex(OSError, 'simulated'):
+                    wildcam_sorter.migrate_category_storage(directory, '狼', '鹿')
+            self.assertTrue(os.path.isfile(source_file))
+            self.assertFalse(os.path.exists(os.path.join(dst, '002.jpg')))
+            with open(csv_path, encoding='utf-8') as handle:
+                self.assertEqual(handle.read(), '物种名\n狼\n')
+
+    def test_main_space_classifies_and_viewer_blocks_shortcut(self):
+        app = WildCamSorter.__new__(WildCamSorter)
+        app.current_group_files = ['001.jpg']
+        app._viewer_open = False
+        app._scan_dialog = None
+        app._last_space_classify = 0
+        app.root = MagicMock()
+        app.root.focus_get.return_value = None
+        app._on_empty = MagicMock()
+        app._on_main_space()
+        app._on_empty.assert_called_once()
+        app._viewer_open = True
+        app._on_main_space()
+        app._on_empty.assert_called_once()
+
+    def test_main_preview_autoplay_rate_and_viewer_half_speed(self):
+        self.assertEqual(wildcam_sorter.MAIN_VIDEO_RATE, 5.0)
+        self.assertEqual(wildcam_sorter.MAIN_VIDEO_DISPLAY_FPS, 20.0)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-WildCam Sorter v1.11（Mac）使用说明
+WildCam Sorter v1.12（Mac）使用说明
 ==================================
 
 一、先确认应该下载哪个版本
@@ -7,10 +7,10 @@ WildCam Sorter v1.11（Mac）使用说明
 点击屏幕左上角“苹果图标 ”→“关于本机”：
 
 1. 如果显示“芯片：Apple M1 / M2 / M3 / M4 / M5……”：
-   使用 WildCamSorter_macOS_AppleSilicon_v1.11_Portable.zip。
+   使用 WildCamSorter_macOS_AppleSilicon_v1.12_Portable.zip。
 
 2. 如果显示“处理器：Intel……”：
-   使用 WildCamSorter_macOS_Intel_v1.11_Portable.zip。
+   使用 WildCamSorter_macOS_Intel_v1.12_Portable.zip。
 
 两个版本不能混用。本程序建议在 macOS 13 Ventura 或更高版本运行。
 
@@ -74,7 +74,7 @@ WildCam Sorter v1.11（Mac）使用说明
    检查硬盘是否为 NTFS。可改用 exFAT/APFS 硬盘，或先输出到 Mac 内置磁盘。
 
 5. 可以删除解压出来的文件吗：
-   WildCamSorter.app 必须保留；使用说明可以自行保留或删除。分类结果和原始照片
+   WildCamSorter.app 必须保留；压缩包中的 README.md 与使用说明可以自行保留。分类结果和原始照片
    不依赖安装包，但输出目录中的 .wildcam_progress.json 用于断点续传，请不要删除。
 
 
@@ -82,14 +82,18 @@ WildCam Sorter v1.11（Mac）使用说明
 ----------------
 
 完整操作方法、拍摄模式设置、复杂分类、CSV 字段和断点续传说明，请查看：
-https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11
+https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12
 
-七、本版界面修复
-----------------
+七、本版界面与快捷键
+------------------
 
 分类与导航按钮分行显示，物种较多时可以横向滚动物种按钮；白色主题的黄色提示
 会换成深色文字。打开媒体查看器不会再调整主窗口；主窗口已进入全屏时，查看器
-会根据主窗口的大小展开。此前直接更新在 1.10 的 macOS 按钮文字和预览提速
+现在在原主窗口内打开“分类/媒体”页面，关闭后返回分类，不改变 Mac 全屏大小。此前直接更新在 1.10 的 macOS 按钮文字和预览提速
 也包含在本版中。详细更新记录见压缩包中的 README.md。
 
 WildCam Sorter — Made by Siyuan ZHU, 2026
+
+长按分类按钮 0.6 秒编辑位置或删除类别；删除时须选择接收分类数据的类别。
+主页面视频自动以目标 5 倍速播放；单独查看默认 0.5 倍速，空格暂停/继续。
+在分类页面按空格为“空拍”，左右键切换上一组和下一组。

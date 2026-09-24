@@ -1,6 +1,6 @@
-# WildCam Sorter v1.11 — 红外相机照片与视频分类器 / Trail-camera Photo & Video Sorter
+# WildCam Sorter v1.12 — 红外相机照片与视频分类器 / Trail-camera Photo & Video Sorter
 
-[中文](#中文说明) · [English](#english-guide) · [下载 / Downloads](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11) · [本版源码 / Source](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11)
+[中文](#中文说明) · [English](#english-guide) · [下载 / Downloads](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.12) · [本版源码 / Source](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12)
 
 ---
 
@@ -9,13 +9,21 @@
 
 ### 简介
 
-改善查看器、连续高速分类与稳定性，增加多范围拍摄模式、双进度条、主题设置和人工分类补录。1.11 增加模式识别与错误文件序号诊断、媒体时间、可配置的性能档位以及离线双语教程，并改进视频播放器。
+在先前版本的分段拍摄模式、双进度条与离线教程基础上，1.12 增加可编辑分类按钮、灵活预览布局和字体大小设置，改进视频预览及 Windows/Mac 查看器。
 
 WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。它按组预览照片和视频，把选中的文件复制到物种类别目录，并保存进度和 CSV。原始输入文件不会被移动或改写。
 
 ### 本版本主要功能
 
-#### 1.11 新增与修复
+#### 1.12 新增与修复
+
+- 长按类别按钮约 0.6 秒进入编辑模式；拖动按钮调整顺序，右上角的 × 可删除类别。删除时先选择另一个类别或“空拍”接收全部分类文件；迁移同步修改 CSV 与进度记录。若目标有同名且内容不同的文件，迁移会中止，不会覆盖。原始输入文件不会变动。
+- 3、4、5、6 等数量的组按文件数自适应排版；3 和 5 个文件时把视频放在较大的预览位。每页最多显示 9 个媒体；组内更多文件可翻页。照片和视频保持原始比例，文件名与时间在同一行，没有超出范围时隐藏类别横向滚动条。
+- 设置中的“界面字号”可以在 80%–150% 之间调整；性能设置允许图片线程最多 12 个、视频预览线程最多 6 个、缩略图缓存上限 4096 MB，预设分别提供 256 / 512 / 2048 MB，性能设置重启生效。高速浏览时复用预览面板和下一组首帧缓存。
+- Windows 单独查看窗口缩小到屏幕内的保守尺寸；Mac 查看器使用主窗口内的“分类”页返回，不另开改变全屏尺寸的窗口。单独视频默认 0.5× 并可按空格暂停/继续；主页面视频自动播放，目标为 5×，限制每秒渲染帧数以避免无谓的持续解码。
+- 主分类页按空格分类为“空拍”，按左右键切换上一组/下一组；在查看器内空格仍控制播放。需要实际流畅播放的速度取决于视频编码、磁盘和设备能力。
+
+#### 1.11 新增与修复（沿用）
 
 - 自动分析连续的照片 + 视频拍摄模式；若样本不足或仅有照片，则请手动指定拍摄模式。发现错误组时逐段列出准确的文件序号范围，点击“重选择模式”会预填检测出的候选模式（请核对）。
 - 每个媒体窗格显示文件名与文件系统创建时间；没有创建时间的系统显示“修改时间”。扫描时跳过 macOS `._` 附属文件，不再把它们当作照片或视频。
@@ -27,7 +35,7 @@ WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。�
 
 - **此前的 Mac 修复**：修复 macOS Aqua 按钮白底白字；主界面采用 4 个图片后台线程和独立的视频线程，修复慢预览及最后一格预览任务停止轮询，并预读下一组缩略图。
 - **本次的跨平台修复**：分类按钮与上一组／跳转至／下一组等导航按钮分行排列；物种按钮可横向滚动，小窗口也能找到全部按钮；浅色主题的黄色提示文字自动变为深琥珀色，黑色主题保留亮黄色，后续新出现的提示同样跟随主题；修复增减物种按钮后分类栏偶现深色块。
-- **本次的查看器修复**：只调整独立查看窗口，不再在打开它时重新配置主窗口；当 Windows 主窗口最大化或 Mac 主窗口放大／全屏时，查看器使用主窗口的完整可见尺寸，解决 Mac 全屏留下黑边的问题。
+- **本次的查看器修复**：只调整独立查看窗口，不再在打开它时重新配置主窗口；当 Windows 主窗口最大化或 Mac 主窗口放大／全屏时，查看器当时使用主窗口的完整可见尺寸；1.12 已进一步改为 Windows 小窗和 Mac 应用内页面。
 
 上述布局与主题问题均影响 Windows 和 macOS，修复同时适用于两个平台。Mac 原生 Aqua 按钮与全屏行为另作兼容处理。
 
@@ -41,7 +49,7 @@ WildCam Sorter 是一款本地运行的红外/野外相机媒体分类工具。�
 
 #### Windows 10/11 64 位
 
-1. 前往 [v1.11 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11) 下载 Windows Portable 压缩包。
+1. 前往 [v1.12 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.12) 下载 Windows Portable 压缩包。
 2. **完整解压** ZIP；不要直接在压缩包预览窗口中运行。
 3. 双击 `WildCamSorter.exe`。便携版不需要安装 Python。
 
@@ -79,7 +87,7 @@ python wildcam_sorter.py
 
 ### 媒体查看器
 
-打开即完整显示媒体；滚轮缩放为 100%–1000%，速度随滚轮动作变化并以指针为中心。图片可向任意方向 1:1 跟随鼠标拖动，窗口自动居中并避开任务栏或程序坞。
+打开即完整显示媒体；滚轮缩放为 100%–1000%，速度随滚轮动作变化并以指针为中心。图片可向任意方向 1:1 跟随鼠标拖动，Windows 查看器以较小尺寸居中，Mac 查看器占用主窗口内的媒体页。
 
 ### CSV、进度与日志
 
@@ -117,7 +125,7 @@ python wildcam_sorter.py
 
 - Python、tkinter、Pillow、OpenCV
 - 打包：PyInstaller
-- 源码分支：[1.11](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11)
+- 源码分支：[1.12](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12)
 - 作者：Siyuan ZHU
 
 ---
@@ -127,25 +135,33 @@ python wildcam_sorter.py
 
 ### Overview
 
-Improves the viewer, rapid continuous sorting, and stability, while adding ranged capture patterns, dual progress bars, themes, and recovery of manually sorted files. Version 1.11 adds camera mode suggestions, exact mismatch file ranges, filesystem timestamps, configurable performance and an offline bilingual reader, and improves video playback.
+Building on ranged capture patterns, dual progress bars and the offline guide, version 1.12 adds editable categories, a flexible preview grid and font scaling, plus improvements to video preview and the Windows/Mac viewers.
 
 WildCam Sorter is a local desktop tool for classifying trail-camera photos and videos. It previews media in groups, copies selected files into species folders, and records progress and CSV data. Original input files are never moved or modified.
 
 ### Highlights in this release
 
-#### 1.11 additions and fixes
+#### 1.12 additions and fixes
+
+- Press and hold a species button for about 0.6 seconds to enter edit mode. Drag to reorder, or use × to delete after choosing another category or Empty as the destination. The migration updates output files, CSV, and saved progress; conflicting filenames with different contents abort safely. Original input media is unchanged.
+- The preview grid adapts to 3, 4, 5, 6 and other group sizes, giving video a larger cell for groups of 3 or 5. Up to nine files are shown per page, with paging for larger groups. Previews retain their aspect ratio; filenames and timestamps share a header row; the category scrollbar appears only if necessary.
+- Scale the whole UI font from 80% to 150%. Configure up to 12 image workers, six video preview workers, and 4096 MB of thumbnail cache; memory presets now provide 256 / 512 / 2048 MB. Worker and cache changes take effect on restart. Reusing preview panes and prefetched video first frames improves rapid browsing.
+- The Windows media viewer opens at a smaller on-screen size; the Mac viewer opens in an in-app tab with a Classification return button, retaining native full-screen window state. Standalone videos default to 0.5× and Space toggles playback. Videos in the main grid autoplay at a target 5× with capped rendering to reduce unnecessary CPU work.
+- In the main classification page, Space means Empty and Left/Right arrows navigate groups. In the viewer, Space continues to pause or resume video. Actual smooth playback still depends on codec, storage and hardware.
+
+#### 1.11 additions and fixes (carried forward)
 
 - Detect likely repeated mixed photo/video capture patterns, report exact file ordinal ranges of mismatches, and prefill suggested modes when choosing “重选择模式” (verify the suggestions). Photo-only footage cannot reveal the number of photos per trigger.
 - Show the file name and filesystem creation time in each pane (modification time where birth time is unavailable). Ignore macOS AppleDouble `._` sidecar files during scans.
 - Two video preview workers by default; fullscreen video decoding, seeking and catching up with the media clock now run in a background worker. Actual playback depends on codecs, storage and hardware.
-- Choose Low memory / Balanced / Fast settings, or configure image and video preview workers, thumbnail cache size and next-group prefetch; **restart to apply**. Copying and CSV writes stay on one ordered worker.
+- Choose Low memory / Balanced / Fast settings, or configure image and video preview workers, thumbnail cache size and next-group media prefetch; **restart to apply**. Copying and CSV writes stay on one ordered worker.
 - The offline bilingual README reader renders headings and lists, clickable HTTP(S) links, a table of contents, a language switch and adjustable text size.
 
 #### 1.10.3 fixes carried forward
 
 - **Earlier Mac fixes:** Readable macOS Aqua button text; four image preview workers and one separate video worker; fixed polling for the final pending preview and added prefetching for the next group.
 - **New cross-platform fixes:** Classification and navigation occupy separate rows. A horizontal scrollbar keeps any number of species buttons accessible in a small window. Yellow warning text becomes dark amber in the light theme and stays bright yellow in the dark theme, including warnings displayed after switching themes. Rebuilding species buttons no longer leaves dark blocks in the light theme.
-- **New viewer fixes:** Opening a photo or video styles only the viewer without reconfiguring the main window. When the parent is maximized on Windows or enlarged/fullscreen on macOS, the viewer fills its available area instead of remaining capped at 1400 pixels.
+- **New viewer fixes:** Opening a photo or video styles only the viewer without reconfiguring the main window. When the parent is maximized on Windows or enlarged/fullscreen on macOS, the viewer previously filled its available area. Version 1.12 replaces this with a smaller Windows window and an embedded Mac page.
 
 The layout and warning-text bugs apply to Windows and macOS. Aqua button rendering and native Mac fullscreen also have platform-specific handling.
 
@@ -197,7 +213,7 @@ Common image formats include JPG, JPEG, PNG, and BMP. Common video formats inclu
 
 ### Media viewer
 
-Media opens fully visible. Wheel zoom spans 100%–1000%, responds to wheel velocity, and stays centered on the pointer. Images pan freely at a 1:1 mouse-to-image distance, and the window is centered within the usable screen area.
+Media opens fully visible. Wheel zoom spans 100%–1000%, responds to wheel velocity, and stays centered on the pointer. Images pan freely at a 1:1 mouse-to-image distance, in a smaller Windows window or a page within the existing Mac window.
 
 ### CSV, progress, and logs
 
@@ -235,5 +251,5 @@ Sorting primarily copies files, so original photos and videos remain in the inpu
 
 - Python, tkinter, Pillow, and OpenCV
 - Packaging: PyInstaller
-- Source branch: [1.11](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11)
+- Source branch: [1.12](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12)
 - Author: Siyuan ZHU
