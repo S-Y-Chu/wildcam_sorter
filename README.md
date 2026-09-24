@@ -1,7 +1,7 @@
 # WildCam Sorter — 红外相机照片与视频分类器 
 # Trail-camera Photo & Video Sorter
 
-[中文](#中文说明) · [English](#english-guide) · [下载 v1.11 / Download](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11) · [问题反馈 / Issues](https://github.com/S-Y-Chu/wildcam_sorter/issues)
+[中文](#中文说明) · [English](#english-guide) · [下载 v1.12 / Download](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.12) · [问题反馈 / Issues](https://github.com/S-Y-Chu/wildcam_sorter/issues)
 
 ---
 
@@ -13,28 +13,27 @@ WildCam Sorter 是一款本地运行的红外/野外相机照片与视频分类�
 
 #### Windows 10/11 64 位
 
-1. 前往 [v1.11 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11) 下载 `WildCamSorter_Windows_v1.11_Portable.zip`。
+1. 前往 [v1.12 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.12) 下载 `WildCamSorter_Windows_v1.12_Portable.zip`。
 2. 完整解压后运行 `WildCamSorter.exe`；无需安装 Python。
 
 #### macOS
 
 1. 在 ` → 关于本机`查看芯片类型。
-2. M 系列下载 `WildCamSorter_macOS_AppleSilicon_v1.11_Portable.zip`；Intel 处理器下载 `WildCamSorter_macOS_Intel_v1.11_Portable.zip`（均在 [v1.11 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11)）。
+2. M 系列下载 `WildCamSorter_macOS_AppleSilicon_v1.12_Portable.zip`；Intel 处理器下载 `WildCamSorter_macOS_Intel_v1.12_Portable.zip`（均在 [v1.12 Release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.12)）。
 3. 完整解压后运行 `WildCamSorter.app`。第一次运行请在 Finder 中按住 Control 点击（或右键）程序，选择**打开**；若仍被阻止，到`系统设置 → 隐私与安全性`点击**仍要打开**。
 4. 建议 macOS 13 Ventura 或更高版本。外接输出盘建议使用 APFS、Mac OS 扩展或 exFAT；macOS 通常不能直接写 NTFS。
 
 > 便携版必须先完整解压，不要直接在 ZIP 预览窗口中运行。
 
-### 最新版本 v1.11
+### 最新版本 v1.12
 
-- 分析照片与视频顺序，给出可能的拍摄模式；不符合设置的组会列出具体文件序号区间，点击“重选择模式”时预填建议值。仅有照片时无法可靠推断每组照片数，仍需手动设置。
-- 四个媒体窗格显示文件名和创建时间；不提供创建时间的系统显示修改时间。扫描时忽略 macOS 的 `._` 附属文件。
-- 主页面默认使用 2 个视频预览线程；单独查看器在后台处理视频解码和进度跳转，以改善倍速播放与拖动进度条时的响应。
-- 性能设置提供“省内存／均衡／快速”档位，并可自定义图片预览线程、视频预览线程、缩略图缓存上限和下一组图片预读。设置在**下次启动**生效；文件复制和 CSV 写入继续按顺序执行。
-- 设置中的离线教程把本地 README 渲染为阅读页面，支持中英文切换、目录跳转、字号调整和可点击的链接。
-- 沿用多范围拍摄模式、快速连续分类、双进度条、主题切换、人工分类识别与 CSV 补录等功能。
+- 长按分类按钮进入编辑模式，可拖动调整顺序；删除前指定接收类别或“空拍”，后台迁移分类文件、CSV 和进度记录，同名不同内容时中止，不覆盖原文件。
+- 3 个、5 个及其他数量的照片视频按组自适应排版；9 个以上可翻页。视频获得更大的预览位，文件名与时间并列显示，类别没有超宽时隐藏滚动条。
+- 在设置中把整体字号调到 80%–150%，图片预览线程最多 12 个、视频预览线程最多 6 个、缩略图缓存最多 4096 MB；下组视频首帧可以预读。性能设置重启生效。
+- Windows 独立查看窗口留出屏幕边距；Mac 在原窗口内切换到媒体页，不改变全屏尺寸。单独播放视频默认 0.5 倍，空格暂停/继续；主页面视频自动以目标 5 倍速播放并限制无用解码。
+- 在主分类页按空格分类为空拍，左右键切换分组；沿用 1.11 的拍摄模式建议、离线双语教程与 CSV 补录。
 
-[查看 v1.11 完整更新与使用说明](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11#readme)。
+[查看 v1.12 完整更新与使用说明](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12#readme)。
 
 ### 版本分支
 
@@ -50,6 +49,7 @@ WildCam Sorter 是一款本地运行的红外/野外相机照片与视频分类�
 | 1.10 | [1.10](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10) | 查看器缩放拖动、多范围模式、快速分类、双进度条和主题。 |
 | 1.10.3 | [1.10.3](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10.3) | 修复 macOS 按钮文字、小窗口布局、浅色主题对比度和全屏查看器。 |
 | 1.11 | [1.11](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11) | 模式建议、错误文件范围、创建时间、视频响应、性能设置和离线双语教程。 |
+| 1.12 | [1.12](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12) | 类别按钮编辑与迁移、自适应预览、字号、5 倍速主预览和跨平台查看器。 |
 
 `main` 只保存项目总说明和版本导航；每个版本的完整源码、测试、依赖和打包配置保存在对应版本分支。旧分支 README 描述该历史版本，不代表最新版功能。
 
@@ -76,28 +76,27 @@ WildCam Sorter is a local desktop tool for classifying trail-camera photos and v
 
 #### Windows 10/11 64-bit
 
-1. Open the [v1.11 release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11) and download `WildCamSorter_Windows_v1.11_Portable.zip`.
+1. Open the [v1.12 release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.12) and download `WildCamSorter_Windows_v1.12_Portable.zip`.
 2. Extract it completely, then launch `WildCamSorter.exe`. Python is not required.
 
 #### macOS
 
 1. Check the processor under `Apple menu → About This Mac`.
-2. Download `WildCamSorter_macOS_AppleSilicon_v1.11_Portable.zip` for Apple Silicon or `WildCamSorter_macOS_Intel_v1.11_Portable.zip` for Intel from the [v1.11 release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.11).
+2. Download `WildCamSorter_macOS_AppleSilicon_v1.12_Portable.zip` for Apple Silicon or `WildCamSorter_macOS_Intel_v1.12_Portable.zip` for Intel from the [v1.12 release](https://github.com/S-Y-Chu/wildcam_sorter/releases/tag/v1.12).
 3. Extract the archive completely and launch `WildCamSorter.app`. On first launch, Control-click (or right-click) it in Finder and choose **Open**. If it is still blocked, choose **Open Anyway** under **System Settings → Privacy & Security**.
 4. macOS 13 Ventura or newer is recommended. Use APFS, Mac OS Extended, or exFAT for external output drives; macOS normally cannot write NTFS.
 
 > Always extract the portable archive completely. Do not launch the app from a ZIP preview window.
 
-### Latest release: v1.11
+### Latest release: v1.12
 
-- Suggest repeated mixed photo/video capture patterns. Report exact file-number ranges of mismatching groups and prefill suggested values when reselecting the mode. The photos-per-trigger count cannot be inferred reliably from photos alone.
-- Show filenames and filesystem creation times in the four media panes (modification time when creation time is unavailable). Ignore macOS `._` sidecar files during scans.
-- Use two video preview workers by default. Fullscreen video decoding and seeking run in a background thread for more responsive playback and scrubbing.
-- Choose Low memory, Balanced, or Fast, or set image/video preview workers, thumbnail cache size, and next-group prefetch. **Restart to apply** performance settings. Copying and CSV writes remain ordered.
-- Read the packaged README offline in a bilingual reading view with a table of contents, adjustable font size, and clickable links.
-- Retain ranged capture patterns, rapid sorting, dual progress bars, themes, and recovery of manually classified media and CSV records.
+- Hold a category button to edit and drag its position. Choose another category or Empty before deletion; migration updates output files, CSV and progress without overwriting differing files of the same name.
+- Preview grids adapt to groups of 3, 5 and other sizes; page through groups larger than nine files. Video receives more preview space, names share a row with timestamps, and the category scrollbar appears only if needed.
+- Scale all UI text to 80%–150%. Configure up to 12 image preview workers, six video workers and 4096 MB of thumbnail cache; next-group video first frames can be prefetched. Performance settings apply after restart.
+- The Windows viewer opens in a smaller window, while the Mac viewer stays in the existing window even in full screen. Standalone video defaults to 0.5x and Space pauses/resumes it; main-grid video autoplays at a target 5x with capped rendering.
+- Space sorts Empty and Left/Right navigates groups on the main page. Version 1.11 camera-pattern suggestions, the offline bilingual guide and CSV backfill remain available.
 
-[Read the full v1.11 notes and guide](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11#readme).
+[Read the full v1.12 notes and guide](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12#readme).
 
 ### Version branches
 
@@ -113,6 +112,7 @@ WildCam Sorter is a local desktop tool for classifying trail-camera photos and v
 | 1.10 | [1.10](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10) | Viewer zoom/pan, ranged patterns, rapid sorting, dual progress bars, and themes. |
 | 1.10.3 | [1.10.3](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.10.3) | macOS button readability, small-window layout, light-theme contrast, and fullscreen viewer fixes. |
 | 1.11 | [1.11](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.11) | Capture suggestions, exact mismatch ranges, timestamps, video responsiveness, performance settings, and offline bilingual guide. |
+| 1.12 | [1.12](https://github.com/S-Y-Chu/wildcam_sorter/tree/1.12) | Editable categories and migration, adaptive previews, font scaling, 5x main preview and platform viewers. |
 
 `main` contains only the project overview and version navigation. Full source, tests, dependencies, and packaging configuration live in each version branch. An older branch README documents that historical version and does not describe every current feature.
 
