@@ -28,7 +28,7 @@ WildCam Sorter 是一款本地运行的红外/野外相机照片与视频分类�
 ### 最新版本 v1.12
 
 - 长按分类按钮进入编辑模式，按钮跟随鼠标移动、邻近按钮平滑让位；删除前指定接收类别或“空拍”，后台迁移分类文件、CSV 和进度记录，同名不同内容时中止，不覆盖原文件。
-- 按本组实际文件数排版：1 个占满、2 个并排、3 个一大两小、4 个 2×2、5 个一大四小（全照片则上三下二）、6 个 3×2；9 个以上可翻页。优先给视频大格，也可在设置中选等大布局。预读小图会自动更新为适合窗格的清晰大图；文件名与时间并列显示。
+- 按本组实际文件数排版：1 个占满、2 个并排、3 个一大两小、4 个 2×2、5 个一大四小（全照片则上三下二）、6 个 3×2；9 个以上可翻页。优先给视频大格，也可在设置中选等大布局。5 个文件含视频时，大格占左半屏、右侧为 2×2 小格。分组布局变化后会按窗格实际尺寸重新加载预览；低分辨率原图等比放大，不裁切画面，可能出现模糊。文件名与时间并列显示。
 - 在设置中把整体字号调到 80%–150%，图片预览线程最多 12 个、视频预览线程最多 6 个、缩略图缓存最多 4096 MB；下组视频首帧可以预读。性能设置重启生效。
 - Windows 独立查看窗口留出屏幕边距；Mac 在原窗口内切换到带 × 关闭按钮的媒体选项卡，不改变全屏尺寸。单独播放视频默认 0.5 倍，空格暂停/继续；主页面视频自动以目标 5 倍速播放并限制无用解码。
 - 在主分类页按空格分类为空拍，左右键切换分组；沿用 1.11 的拍摄模式建议、离线双语教程与 CSV 补录。
@@ -91,7 +91,7 @@ WildCam Sorter is a local desktop tool for classifying trail-camera photos and v
 ### Latest release: v1.12
 
 - Hold a category button to edit and drag it with the pointer as neighboring buttons slide into place. Choose another category or Empty before deletion; migration updates output files, CSV and progress without overwriting differing files of the same name.
-- Preview grids adapt to group size: one file fills the pane; two share a row; three use one large and two small cells; four use 2×2; five use one large and four small cells (or three above two for photos only); six use 3×2. Page through groups larger than nine files. Video receives the large cell where available, or choose equal-size cells in Settings. Small prefetched thumbnails upgrade to sharp pane-sized previews automatically.
+- Preview grids adapt to group size: one file fills the pane; two share a row; three use one large and two small cells; four use 2×2; five use one large and four small cells (or three above two for photos only); six use 3×2. Page through groups larger than nine files. Video receives the large cell where available, or choose equal-size cells in Settings. In five-media groups the large video cell occupies the left half, next to four small cells. After a grid change, previews reload to the real pane dimensions; low-resolution source media scales up without cropping and may look soft.
 - Scale all UI text to 80%–150%. Configure up to 12 image preview workers, six video workers and 4096 MB of thumbnail cache; next-group video first frames can be prefetched. Performance settings apply after restart.
 - The Windows viewer opens in a smaller window, while the Mac viewer opens an in-window media tab with an × close control, even in full screen. Standalone video defaults to 0.5x and Space pauses/resumes it; main-grid video autoplays at a target 5x with capped rendering.
 - Space sorts Empty and Left/Right navigates groups on the main page. Version 1.11 camera-pattern suggestions, the offline bilingual guide and CSV backfill remain available.
